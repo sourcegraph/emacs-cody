@@ -38,23 +38,30 @@
 
 (defun cody--connection-configuration ()
   ""
-  `(:accessToken ,(cody--access-token)
-    :serverEndpoint "https://sourcegraph.sourcegraph.com"
-    :codebase "https://github.com/keegancsmith/emacs-cody"))
+  (list :accessToken (cody--access-token)
+        :serverEndpoint "https://sourcegraph.sourcegraph.com"
+        :codebase "https://github.com/keegancsmith/emacs-cody"))
 
-(cl-defun cody--request (method &rest argument &allow-other-keys)
+(cl-defun cody--request (method &rest params &allow-other-keys)
   "Helper to send a cody request for a method with one argument."
-  (jsonrpc-request (cody--connection) method argument))
+  (jsonrpc-async-request (cody--connection) method params
+                         :success-fn (lambda (result) (message "RESPONSE %s" result))
+                         :error-fn (lambda (result) (message "ERROR %s" result))
+                         :timeout-fn (lambda () (message "TIMEOUT"))))
+
+(defun cody--alive-p ()
+  ""
+  (and cody---connection
+       (zerop (process-exit-status (jsonrpc--process cody---connection)))))
 
 (defun cody--connection ()
   ""
   ;; TODO check node version and allow overriding location of node
-  (unless (and cody---connection
-               (zerop (process-exit-status (jsonrpc--process cody---connection))))
+  (unless (cody--alive-p)
     (setq cody---connection
           (make-instance 'jsonrpc-process-connection
                          :name "cody"
-                         :events-buffer-scrollback-size 0
+                         :events-buffer-scrollback-size nil
                          :notification-dispatcher #'cody--handle-notification
                          :process (make-process :name "cody"
                                                 :command (list "node" cody--cody-agent)
@@ -73,5 +80,19 @@
 (defun cody--handle-notification (_ method msg)
   ""
   (message "NOTIF %s %s" method msg))
+
+(defun cody-shutdown ()
+  ""
+  (if (cody--alive-p)
+      (progn
+        (cody--request 'shutdown)
+        (kill-process (jsonrpc--process cody---connection))
+        (setq cody---connection nil))))
+
+;; (display-buffer (jsonrpc-events-buffer (cody--connection)))
+;; (cody--request 'recipes/list)
+;; (cody--connection)
+;; (cody--alive-p)
+;; (cody-shutdown)
 
 ;;; emacs-cody.el ends here
