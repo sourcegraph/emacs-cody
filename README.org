@@ -10,6 +10,8 @@ it ever graduates to being useful it will migrate to the sourcegraph org.
 Can start the cody-agent and send it initialize. It fetches your access token
 via auth-source and hardcodes the instance and codebase.
 
+It has a very hacky cody chat interface via the interactive function cody.
+
 To try it out evaluate the buffer. Then try out the cody--request function:
 
 #+begin_src emacs-lisp
@@ -21,6 +23,6 @@ To try it out evaluate the buffer. Then try out the cody--request function:
                  :humanChatInput "Does cody work in emacs?")
 #+end_src
 
-Right now it always timesout for me. You can view the output by switching to
-the =*cody output*= buffer. Alternatively run =list-processes= and select the
-buffer. You can also shut down cody by hitting =d= on the cody process.
+You can view the output by switching to the =*cody output*= and =*cody
+events*= buffer. Alternatively run =list-processes= and select the buffer. You
+can also shut down cody by hitting =d= on the cody process.

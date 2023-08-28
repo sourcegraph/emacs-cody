@@ -20,6 +20,7 @@
   "Path to cody-agent.js.")
 
 (defvar cody---connection nil "")
+(defvar cody--message-in-progress nil "")
 
 ;; Add to you ~/.authinfo.gpg something that looks like
 ;;
@@ -40,14 +41,13 @@
   ""
   (list :accessToken (cody--access-token)
         :serverEndpoint "https://sourcegraph.sourcegraph.com"
-        :codebase "https://github.com/keegancsmith/emacs-cody"))
+        ;; Note there is a bug currently where the agent initialize request
+        ;; fails if the serverEndpoint doesn't know the codebase.
+        :codebase "https://github.com/sourcegraph/cody"))
 
 (cl-defun cody--request (method &rest params &allow-other-keys)
   "Helper to send a cody request for a method with one argument."
-  (jsonrpc-async-request (cody--connection) method params
-                         :success-fn (lambda (result) (message "RESPONSE %s" result))
-                         :error-fn (lambda (result) (message "ERROR %s" result))
-                         :timeout-fn (lambda () (message "TIMEOUT"))))
+  (jsonrpc-request (cody--connection) method params))
 
 (defun cody--alive-p ()
   ""
@@ -69,25 +69,53 @@
                                                 :connection-type 'pipe
                                                 :stderr (get-buffer-create "*cody stderr*")
                                                 :noquery t)))
+
     (message "Cody started.")
-    (cody--request 'initialize
-               :name "emacs"
-               :version "0.1"
-               :workspaceRootPath "" ;; TODO
-               :connectionConfiguration (cody--connection-configuration)))
+
+    ;; The 'initialize' request must be sent at the start of the connection
+    ;; before any other request/notification is sent.
+    (jsonrpc-request cody---connection 'initialize
+                     (list
+                      :name "emacs"
+                      :version "0.1"
+                      :workspaceRootPath "" ;; TODO
+                      :connectionConfiguration (cody--connection-configuration)))
+
+    ;; The 'initalized' notification must be sent after receiving the 'initialize' response.
+    (jsonrpc-notify cody---connection 'initialized nil))
   cody---connection)
 
-(defun cody--handle-notification (_ method msg)
+(defun cody--handle-notification (_ method params)
   ""
-  (message "NOTIF %s %s" method msg))
+  (pcase method
+    ;; keep the latest message until nil then send it
+    ('chat/updateMessageInProgress
+     (if params
+         (setq cody--message-in-progress (plist-get params :displayText))
+       (message "assistant:%s" cody--message-in-progress)))))
 
 (defun cody-shutdown ()
   ""
-  (if (cody--alive-p)
-      (progn
-        (cody--request 'shutdown)
-        (kill-process (jsonrpc--process cody---connection))
-        (setq cody---connection nil))))
+  (when (cody--alive-p)
+    (cody--request 'shutdown)
+    (kill-process (jsonrpc--process cody---connection))
+    (setq cody---connection nil)))
+
+(defun cody ()
+  ""
+  (interactive)
+  (let* ((recipes (cody--request 'recipes/list))
+         (recipe (completing-read "recipe: "
+                                  (seq-map (lambda (elt)
+                                             (plist-get elt :id))
+                                           recipes)
+                                  nil
+                                  t))
+         (chat (read-from-minibuffer (concat recipe ": "))))
+    (cody--request 'recipes/execute
+                  :id recipe
+                  :humanChatInput chat))
+  (message "Cody recipe sent. Will update minibuffer asynchronously."))
 
 ;; (display-buffer (jsonrpc-events-buffer (cody--connection)))
 ;; (cody--request 'recipes/list)
