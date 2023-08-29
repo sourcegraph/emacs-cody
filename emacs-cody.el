@@ -21,21 +21,24 @@
 
 (defvar cody---connection nil "")
 (defvar cody--message-in-progress nil "")
+(defvar cody--access-token nil "")
 
 ;; Add to you ~/.authinfo.gpg something that looks like
 ;;
 ;;  machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
 (defun cody--access-token ()
-  ""
-  ;; We are looking for an API key, so look for the first entry where the secret
-  ;; starts with sgp_
-  (seq-some (lambda (found)
-              (let ((token (auth-info-password found)))
-                (if (string-prefix-p "sgp_" token) token)))
-            (auth-source-search
-             :max 10
-             :host "sourcegraph.sourcegraph.com"
-             :require '(:secret :host))))
+  "Fetch and cache the access token from ~/.authinfo.gpg"
+  (or cody--access-token
+      ;; We are looking for an API key, so look for the first entry
+      ;; where the secret starts with sgp_
+      (setq cody--access-token
+            (seq-some (lambda (found)
+                        (let ((token (auth-info-password found)))
+                          (if (string-prefix-p "sgp_" token) token)))
+                      (auth-source-search
+                       :max 10
+                       :host "sourcegraph.sourcegraph.com"
+                       :require '(:secret :host))))))
 
 (defun cody--connection-configuration ()
   ""
