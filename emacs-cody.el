@@ -23,6 +23,22 @@
 (defvar cody--message-in-progress nil "")
 (defvar cody--access-token nil "")
 
+(defmacro with-buffer (buf form)
+  "Executes FORM in buffer BUF.
+BUF can be a buffer name or a buffer object.
+If the buffer doesn't exist, it's created."
+  `(let ((buffer (gentemp)))
+    (setq buffer
+	  (if (stringp ,buf)
+	      (get-buffer-create ,buf)
+	    ,buf))
+    (save-excursion
+      (set-buffer buffer)
+      ,form)))
+
+(put 'with-buffer 'lisp-indent-function 1)
+(def-edebug-spec with-buffer t)
+
 ;; Add to you ~/.authinfo.gpg something that looks like
 ;;
 ;;  machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
@@ -88,17 +104,32 @@
     (jsonrpc-notify cody--connection 'initialized nil))
   cody--connection)
 
+;; See https://www.gnu.org/software/emacs/manual/html_node/elisp/JSONRPC-Overview.html
+;; for a description of the parameters for this jsonrpc notification callback.
 (defun cody--handle-notification (_ method params)
-  ""
-  (pcase method
-    ;; keep the latest message until nil then send it
+  "Handle notifications from the agent, e.g. shutdown."
+  (cl-case method
     ('chat/updateMessageInProgress
-     (if params
-         (setq cody--message-in-progress (plist-get params :displayText))
-       (message "assistant:%s" cody--message-in-progress)))))
-
+    ;; The agent sends an update with increasingly long hunks of the response,
+    ;; e.g. "Here", "Here is", "Here is an", "Here is an explanation", ...
+    ;; This permits a typewriter effect.
+     (with-buffer "*cody-chat*"
+       (if params
+           (let* ((old-text cody--message-in-progress)
+                  (new-text (plist-get params :displayText))
+                  (tail (if (>= (length new-text) (length old-text))
+                            (substring new-text (length old-text))
+                          ;; This could happen if the generator "backs up",
+                          ;; which I've seen happen with ChatGPT, so we'll
+                          ;; likely need to handle this at some point.
+                          "")))
+             (insert tail)
+             (setq cody--message-in-progress new-text))
+         (newline))))))
+       
 (defun cody-shutdown ()
-  ""
+  "Stop the Cody agent process."
+  (interactive)
   (when (cody--alive-p)
     (cody--request 'shutdown)
     (kill-process (jsonrpc--process cody--connection))
@@ -118,8 +149,30 @@
     (cody--request 'recipes/execute
                   :id recipe
                   :humanChatInput chat))
-  (message "Cody recipe sent. Will update minibuffer asynchronously."))
+  (message "Cody recipe sent."))
 
+(defun cody--log (msg &rest args)
+  "Log a message, currently just for debugging"
+  ;; TODO: Use a real logging package
+  (save-excursion
+    (set-buffer (get-buffer-create "*cody-log*"))
+    (goto-char (point-max))
+    (insert (apply #'format msg args) "\n")))
+
+(defun cody-chat ()
+  "Shorthand for the chat recipe.
+Output goes into the *cody-chat* buffer."
+  (interactive)
+  (let ((chatbuf (get-buffer-create "*cody-chat*")))
+    (display-buffer chatbuf)
+    (with-buffer chatbuf
+      (goto-char (point-max)))
+    (cody--request 'recipes/execute
+                   :id "chat-question"
+                   :humanChatInput (read-from-minibuffer "Ask Cody: "))
+    (message "Awaiting response from Cody...")))
+
+        
 ;; (display-buffer (jsonrpc-events-buffer (cody--connection)))
 ;; (cody--request 'recipes/list)
 ;; (cody--connection)
