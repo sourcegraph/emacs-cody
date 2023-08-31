@@ -19,7 +19,7 @@
                     "dist" "cody-agent.js")
   "Path to cody-agent.js.")
 
-(defvar cody---connection nil "")
+(defvar cody--connection nil "")
 (defvar cody--message-in-progress nil "")
 (defvar cody--access-token nil "")
 
@@ -54,14 +54,14 @@
 
 (defun cody--alive-p ()
   ""
-  (and cody---connection
-       (zerop (process-exit-status (jsonrpc--process cody---connection)))))
+  (and cody--connection
+       (zerop (process-exit-status (jsonrpc--process cody--connection)))))
 
 (defun cody--connection ()
   ""
   ;; TODO check node version and allow overriding location of node
   (unless (cody--alive-p)
-    (setq cody---connection
+    (setq cody--connection
           (make-instance 'jsonrpc-process-connection
                          :name "cody"
                          :events-buffer-scrollback-size nil
@@ -77,7 +77,7 @@
 
     ;; The 'initialize' request must be sent at the start of the connection
     ;; before any other request/notification is sent.
-    (jsonrpc-request cody---connection 'initialize
+    (jsonrpc-request cody--connection 'initialize
                      (list
                       :name "emacs"
                       :version "0.1"
@@ -85,8 +85,8 @@
                       :connectionConfiguration (cody--connection-configuration)))
 
     ;; The 'initalized' notification must be sent after receiving the 'initialize' response.
-    (jsonrpc-notify cody---connection 'initialized nil))
-  cody---connection)
+    (jsonrpc-notify cody--connection 'initialized nil))
+  cody--connection)
 
 (defun cody--handle-notification (_ method params)
   ""
@@ -101,8 +101,8 @@
   ""
   (when (cody--alive-p)
     (cody--request 'shutdown)
-    (kill-process (jsonrpc--process cody---connection))
-    (setq cody---connection nil)))
+    (kill-process (jsonrpc--process cody--connection))
+    (setq cody--connection nil)))
 
 (defun cody ()
   ""
