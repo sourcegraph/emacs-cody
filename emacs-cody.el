@@ -9,6 +9,7 @@
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16"))
 
 ;;; Code:
+(require 'cl-lib)
 (require 'auth-source)
 (require 'jsonrpc)
 
@@ -28,7 +29,7 @@ Customizing `cody-agent-binary` will override this default.")
 (defconst cody-log-buffer-name "*cody-log*" "")
 (defconst cody-chat-buffer-name "*cody-chat*" "")
 
-(defvar cody--use-threads nil
+(defvar cody--use-threads t
   "True to use threads; set to false for easier debugging.")
 
 (defvar cody--typewriter-effect nil
@@ -132,9 +133,10 @@ Setting this to non-nil overrides the default distributed Cody agent."
 (defun cody--initialize ()
   (unless cody--initialized-p
     (setq cody--initialized-p t)
-    (add-hook 'find-file-hook 'cody--notify-find-file)
+    (add-hook 'find-file-hook #'cody--notify-find-file)
+    (add-hook 'kill-buffer-hook #'cody--kill-buffer-function)
     (if cody--use-threads
-        ;; TODO: Debugger is unable to exit if there's an error in the thread function.
+        ;; N.B. Debugger is unable to exit if there's an error in the thread function.
         (make-thread (lambda ()
                        (cody--startup-notifications))
                      "Cody startup thread")
@@ -198,6 +200,27 @@ This has the side effect of starting the agent if it is not running."
      (cody--request 'exit)
      (message "Cody has shut down."))))
 
+(defun cody--kill-buffer-function ()
+  "If we are killing the last buffer visiting this file, notify agent."
+  (when (and buffer-file-name
+             (cody--last-buffer-for-file-p))
+      (jsonrpc-notify (cody--connection) 'textDocument/didClose
+                      (list :name buffer-file-name))
+      (cody-log "Notified agent closed %s" buffer-file-name)))
+
+
+(defun cody--last-buffer-for-file-p ()
+  "Check if the current buffer is the last one visiting its file.
+It returns non-nil if the buffer being killed is the last one
+visiting its associated file."
+  (let ((current-file (buffer-file-name))
+        (current-buf (current-buffer)))
+    (when current-file
+      (not (cl-some (lambda (buf)
+                      (and (not (eq buf current-buf))
+                           (string-equal current-file (buffer-file-name buf))))
+                    (buffer-list))))))
+
 (defun cody--handle-chat-update (params)
   (message nil) ; clear the "Awaiting Cody response..." message
   (if cody--typewriter-effect
@@ -217,7 +240,8 @@ This has the side effect of starting the agent if it is not running."
   "Insert ARGS at the end of the Cody chat buffer."
   (with-current-buffer (cody-chat-buffer)
     (goto-char (point-max))
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          (inhibit-modification-hooks t))
       (apply #'insert args)
       (set-buffer-modified-p nil)
       (cody-chat-scroll-to-bottom))))
@@ -262,7 +286,8 @@ Cody chat buffer should be current, and params non-nil."
   (when (cody--alive-p)
     (cody--request 'shutdown) ; Required by the protocol
     (cody--kill-process)
-    (remove-hook 'find-file-hook 'cody--notify-find-file)
+    (remove-hook 'find-file-hook #'cody--notify-find-file)
+    (remove-hook 'kill-buffer-hook #'cody--kill-buffer-function)
     (setq cody--initialized-p nil
           cody--message-in-progress nil)))
 
@@ -349,10 +374,11 @@ Query and output go into the *cody-chat* buffer."
                         "cody-logo.png")))
         (with-current-buffer (get-buffer-create cody-chat-buffer-name)
           (buffer-disable-undo)
-          (insert-image (create-image cody-logo) "Cody")
-          (insert "Welcome to Cody. Type `M-x cody-help` for more info.\n")
-          (set-buffer-modified-p nil)
-          (markdown-mode)
+          (let ((inhibit-modification-hooks t))
+            (insert-image (create-image cody-logo) "Cody")
+            (insert "Welcome to Cody. Type `M-x cody-help` for more info.\n")
+            (set-buffer-modified-p nil)
+            (markdown-mode))
           (current-buffer))))))
 
 (defun cody--text-file-p (buf)
