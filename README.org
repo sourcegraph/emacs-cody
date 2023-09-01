@@ -7,22 +7,54 @@ it ever graduates to being useful it will migrate to the sourcegraph org.
 
 * Status
 
-Can start the cody-agent and send it initialize. It fetches your access token
-via auth-source and hardcodes the instance and codebase.
+Starts and initializes the agent, and establishes a jsonrpc connection.
+It uses a distributed copy of the Cody agent as compressed javascript, but
+you can override this by specifying the location of the agent binary, e.g.:
 
-It has a very hacky cody chat interface via the interactive function cody.
+#+begin_src emacs-lisp
+   (setq cody--agent-binary
+         "/path/to/eg/cody/agent/dist/agent-macos-arm64/agent-macos-arm64")
+#+end_src
 
-To try it out evaluate the buffer. Then try out the cody--request function:
+Fetches your access token via auth-source and hardcodes the instance
+and codebase. You can currently bypass this by setting your access
+token directly:
+
+#+begin_src emacs-lisp
+  (setq cody--access-token "sgp_etc")
+#+end_src
+
+To try it out, evaluate the buffer.
+
+* Available commands
+
+  `M-x cody` will start Cody and prompt you with available commands
+  `M-x cody-chat` will pop you immediately into the Q&A command
+
+The chat is currently pretty unsatisfying - your queries are done in
+the minibuffer, and the output is appended to a read-only chat buffer.
+In the future it should probably work more like ChatGPT or a shell.
+
+* Debugging
+
+  `M-x cody-start` to start and initialize the agent without doing a command
+  `M-x cody-force-unload` to tear everything down
 
 #+begin_src emacs-lisp
   (load-file "emacs-cody.el")
-
+  
   (cody--request 'recipes/list)
   (cody--request 'recipes/execute
                  :id "code-question"
                  :humanChatInput "Does cody work in emacs?")
 #+end_src
 
-You can view the output by switching to the =*cody output*= and =*cody
-events*= buffer. Alternatively run =list-processes= and select the buffer. You
-can also shut down cody by hitting =d= on the cody process.
+You can view the output by switching to the =*cody output*= and
+=*cody events*= buffer. You can also see debugging messages in the
+=*cody log*= buffer.
+
+You can shut down the connection with =*M-x cody-shutdown*=, or shut
+it down and remove all traces with =*M-x cody-force-unload*=.
+
+Alternatively run =list-processes= and select the buffer. You can also
+shut down cody by hitting =d= on the cody process.
