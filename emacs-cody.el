@@ -192,9 +192,9 @@ This has the side effect of starting the agent if it is not running."
 (defun cody--handle-notification (_ method params)
   "Handle notifications from the agent, e.g. shutdown."
   (cl-case method
-    ('chat/updateMessageInProgress
+    (chat/updateMessageInProgress
      (cody--handle-chat-update params))
-    ('shutdown
+    (shutdown
      ;; Server initiated shutdown.
      (cody--kill-process)
      (cody--request 'exit)
@@ -278,7 +278,7 @@ Cody chat buffer should be current, and params non-nil."
             ""))))
     (let ((inhibit-read-only t))
       (insert tail))
-    (setq cody--message-in-progress new-text)))                                
+    (setq cody--message-in-progress new-text)))
 
 (defun cody-shutdown ()
   "Stop the Cody agent process."
