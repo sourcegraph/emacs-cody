@@ -13,6 +13,8 @@
 (require 'auth-source)
 (require 'jsonrpc)
 
+;;; TODO: Tests!
+
 (defconst cody--cody-agent
   (file-name-concat (file-name-directory
                      (or load-file-name
@@ -77,6 +79,7 @@ Setting this to non-nil overrides the default distributed Cody agent."
 
 (cl-defun cody--request (method &rest params &allow-other-keys)
   "Helper to send a Cody request."
+  ;; TODO: Make requests cancellable and implement $/cancelRequest.
   (jsonrpc-request (cody--connection) method params))
 
 (defun cody--alive-p ()
@@ -134,6 +137,7 @@ Setting this to non-nil overrides the default distributed Cody agent."
   (unless cody--initialized-p
     (setq cody--initialized-p t)
     (add-hook 'find-file-hook #'cody--notify-find-file)
+    (add-hook 'after-change-functions #'cody--after-change)
     (add-hook 'kill-buffer-hook #'cody--kill-buffer-function)
     (if cody--use-threads
         ;; N.B. Debugger is unable to exit if there's an error in the thread function.
@@ -148,6 +152,24 @@ Current buffer will be the newly opened file."
   (when (and (cody--alive-p) ;; Or Cody will resurrect every time you open a file...
              (cody--text-file-p (current-buffer)))
     (cody--notify-file)))
+
+(defun cody-lock-after-change (start end old-len)
+  "Implement `textDocument/didChange` notification.
+Installed on `after-change-functions'.
+START and END are the start and end of the changed text.  OLD-LEN
+is the pre-change length."
+  ;; Protocol is not yet implemented in the Agent, so we need that first.
+  ;; This is just a stub.
+  (unless 'cody-finish-me
+    (when (and (cody--alive-p)
+               (cody--text-file-p (current-buffer)))
+      ;; I think the protocol is modeled on the vscode.TextDocumentChangedEvent
+      ;; https://code.visualstudio.com/api/references/vscode-api#TextDocumentChangeEvent
+      ;; Just making a best-effort here, as it's not yet implemented even in VSCode.
+      (jsonrpc-notify (cody--connection) 'textDocument/didChange
+                      (list
+                       :contentChanges)))))
+
 
 (defun cody--startup-notifications ()
   "Tell the new Cody agent process about all currently visited files.
