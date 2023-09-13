@@ -28,6 +28,11 @@ Customizing `cody-agent-binary` will override this default.")
 (defvar cody--access-token nil "")
 (defvar cody--initialized-p nil "")
 
+(defvar cody--last-point nil "The last point position.")
+(make-variable-buffer-local 'cody--last-point)
+(defvar cody--last-mark nil "The last mark position.")
+(make-variable-buffer-local 'cody--last-mark)
+
 (defconst cody-log-buffer-name "*cody-log*" "")
 (defconst cody-chat-buffer-name "*cody-chat*" "")
 
@@ -51,6 +56,15 @@ Customizing `cody-agent-binary` will override this default.")
 Setting this to non-nil overrides the default distributed Cody agent."
   :group 'cody
   :type 'string)
+
+(defconst cody--standard-hooks
+  '((after-change-functions . cody--after-change)
+    (kill-buffer-hook . cody--kill-buffer-function)
+    (post-command-hook . cody--post-command-function)
+    (find-file-hook . cody--notify-find-file))
+  "List of global hooks for which we register and unregister.")
+
+;; These is primarily for keeping the agent notified about current file adn r positions.")
 
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;
@@ -136,9 +150,7 @@ Setting this to non-nil overrides the default distributed Cody agent."
 (defun cody--initialize ()
   (unless cody--initialized-p
     (setq cody--initialized-p t)
-    (add-hook 'find-file-hook #'cody--notify-find-file)
-    (add-hook 'after-change-functions #'cody--after-change)
-    (add-hook 'kill-buffer-hook #'cody--kill-buffer-function)
+    (cody--update-hooks 'add-hook)
     (if cody--use-threads
         ;; N.B. Debugger is unable to exit if there's an error in the thread function.
         (make-thread (lambda ()
@@ -149,27 +161,8 @@ Setting this to non-nil overrides the default distributed Cody agent."
 (defun cody--notify-find-file ()
   "Notify Cody when the user loads a file into a buffer.
 Current buffer will be the newly opened file."
-  (when (and (cody--alive-p) ;; Or Cody will resurrect every time you open a file...
-             (cody--text-file-p (current-buffer)))
+  (when (cody-tracking-buffer-p) ;; Ensures Cody does not auto-start on file open.
     (cody--notify-file)))
-
-(defun cody-lock-after-change (start end old-len)
-  "Implement `textDocument/didChange` notification.
-Installed on `after-change-functions'.
-START and END are the start and end of the changed text.  OLD-LEN
-is the pre-change length."
-  ;; Protocol is not yet implemented in the Agent, so we need that first.
-  ;; This is just a stub.
-  (unless 'cody-finish-me
-    (when (and (cody--alive-p)
-               (cody--text-file-p (current-buffer)))
-      ;; I think the protocol is modeled on the vscode.TextDocumentChangedEvent
-      ;; https://code.visualstudio.com/api/references/vscode-api#TextDocumentChangeEvent
-      ;; Just making a best-effort here, as it's not yet implemented even in VSCode.
-      (jsonrpc-notify (cody--connection) 'textDocument/didChange
-                      (list
-                       :contentChanges)))))
-
 
 (defun cody--startup-notifications ()
   "Tell the new Cody agent process about all currently visited files.
@@ -178,36 +171,75 @@ in the user's Emacs session when they start or restart Cody."
   (let ((file-count 0))
     (cl-loop
      for buf being the buffers
-     when (cody--text-file-p buf)
+     when (cody-tracking-buffer-p buf)
      do
+     (add-hook 'post-command-hook 'cody--post-command-function)
      (cody--notify-file buf)
      (cl-incf file-count)
-     finally (message "Cody has been told about %s files" file-count))))
+     finally (cody-log "Cody agent notified of %s open files" file-count))))
 
 (cl-defun cody--notify-file (&optional (buf (current-buffer)))
   "Tell the agent that we are visiting a file.
 This has the side effect of starting the agent if it is not running."
-  (save-excursion
-    (set-buffer buf)
-    ;; Get the current selection, which is from the point to the point
-    ;; (zero-width) if the mark is not set.
-    (let ((start-line (1- (line-number-at-pos (point)))) ; 0-indexed
-          (start-col (current-column)) ; 0-indexed
-          (end-line (1- (line-number-at-pos (mark))))
-          (end-col (save-excursion
-                     (goto-char (or (mark) (point)))
-                     (current-column))))
-      (jsonrpc-notify (cody--connection) 'textDocument/didOpen
-                      (list
-                       :name (buffer-file-name buf)
-                       :content (buffer-substring-no-properties (point-min)
-                                                                (point-max))
-                       :selection (list
-                                   :start `(:line ,start-line :character ,start-col)
-                                   :end `(:line ,end-line :character ,end-col))))
-      (cody-log "Notified agent of %s (size %s)"
-                (buffer-file-name buf)
-                (point-max)))))
+  (cody--send-file-to-agent buf 'textDocument/didOpen))
+
+(defun cody--send-file-to-agent (buf op)
+  (with-current-buffer buf
+    (jsonrpc-notify (cody--connection) op
+                    (list
+                     :filePath (buffer-file-name buf)
+                     :content (buffer-substring-no-properties (point-min)
+                                                              (point-max))
+                     :selection (cody--get-selection buf)))))
+
+(defun cody--after-change (start end old-len)
+  "Implement `textDocument/didChange` notification.
+Installed on `after-change-functions'.
+START and END are the start and end of the changed text.  OLD-LEN
+is the pre-change length."
+  (ignore-errors
+    (when (cody-tracking-buffer-p)
+      (let ((happy nil))
+        (unwind-protect
+            (progn
+              ;; Dispense with optimization and just blast the whole file over. Vavoom.
+              (cody--send-file-to-agent (current-buffer)
+                                        'textDocument/didChange)
+              (setq happy t))
+          (if happy
+              (cody-log "Blasted whole file %s on small change" buffer-file-name)
+            (cody-log "Unable to update Cody agent for %s" buffer-file-name)))))))
+    
+
+(defun cody--post-command-function ()
+  "If point or mark has moved, update selection/focus with agent.
+Installed on `post-command-hook', which see."
+  (ignore-errors
+    (when (cody-tracking-buffer-p)
+      cody--debuggable-post-command)))
+
+(defun cody--debuggable-post-command ()
+  "Set your breakpoint for `cody--post-command-function` here instead."
+  (let ((point-unequal (neq cody--last-point (point)))
+        ;; If the mark isn't set (nil), we pretend it is set at point,
+        ;; yielding a zero-width range for the current selection.
+        (mark-unequal (neq cody--last-mark (or (mark) (point)))))
+    (if point-unequal
+        (setq cody--last-point (point)))
+    (if mark-unequal
+        (setq cody--last-mark (or (mark) (point))))
+    (if (or point-unequal mark-unequal)
+        (cody--handle-focus-change))))
+
+(defun cody--handle-focus-change ()
+  "Notify agent that cursor or selection has changed in current buffer."
+  ;; Does not send the file contents. Olaf assured me you can leave it undefined
+  ;; when you're just updating the selection or caret.
+  (jsonrpc-notify (cody--connection) 'textDocument/didFocus
+                  (list
+                   :filePath (buffer-file-name buf)
+                   ;; Specifically leave :content undefined here.
+                   :selection (cody--get-selection buf))))
 
 ;; See https://www.gnu.org/software/emacs/manual/html_node/elisp/JSONRPC-Overview.html
 ;; for a description of the parameters for this jsonrpc notification callback.
@@ -227,9 +259,28 @@ This has the side effect of starting the agent if it is not running."
   (when (and buffer-file-name
              (cody--last-buffer-for-file-p))
       (jsonrpc-notify (cody--connection) 'textDocument/didClose
-                      (list :name buffer-file-name))
+                      (list :filePath buffer-file-name))
       (cody-log "Notified agent closed %s" buffer-file-name)))
 
+
+(defun cody--get-selection (buf)
+  "Return the jsonrpc parameters representing the selection in BUF.
+BUF can be a buffer or buffer-name, and we return a Range with `start'
+and `end' parameters, each a Position of 1-indexed `line' and `character'.
+The return value is appropiate for sending directly to the rpc layer."
+  (cl-flet ((pos-parameters (pos)
+              (list :line (line-number-at-pos pos)
+                    :character (save-excursion
+                                 (goto-char pos)
+                                 (1+ (current-column))))))
+    (with-current-buffer buf
+      (let* ((mark (if mark-active (mark) (point)))
+             (point (point))
+             (beg (min mark point))
+             (end (max mark point))
+             (beg-pos (pos-parameters beg))
+             (end-pos (pos-parameters end)))
+        (list :start beg-pos :end end-pos)))))
 
 (defun cody--last-buffer-for-file-p ()
   "Check if the current buffer is the last one visiting its file.
@@ -305,13 +356,25 @@ Cody chat buffer should be current, and params non-nil."
 (defun cody-shutdown ()
   "Stop the Cody agent process."
   (interactive)
+  (cody--update-hooks 'remove-hook)
   (when (cody--alive-p)
     (cody--request 'shutdown) ; Required by the protocol
-    (cody--kill-process)
-    (remove-hook 'find-file-hook #'cody--notify-find-file)
-    (remove-hook 'kill-buffer-hook #'cody--kill-buffer-function)
-    (setq cody--initialized-p nil
-          cody--message-in-progress nil)))
+    (cody--kill-process))
+  (setq cody--initialized-p nil
+        cody--message-in-progress nil))
+
+(defun cody--update-hooks (op)
+  "Add or remove each of our hooks.
+OP is `add-hook' or `remove-hook'."
+  ;; First add or remove us from the global hooks.
+  (cl-loop for (hook . func) in cody--standard-hooks
+           do (funcall op hook func))
+  ;; Now go through every Cody-tracked buffer and add/remove the post-command-hook,
+  ;; which for some reason gets set and wholly overrides/shadows the global value.
+  (dolist (buffer (buffer-list))
+    (when (cody-tracking-buffer-p buffer)
+      (with-current-buffer buffer
+        (funcall op 'post-command-hook #'cody--post-command-function)))))
 
 (defun cody-force-unload ()
   "Shut down Cody and remove all Cody-related buffers."
@@ -403,6 +466,12 @@ Query and output go into the *cody-chat* buffer."
             (markdown-mode))
           (current-buffer))))))
 
+(cl-defun cody-tracking-buffer-p (&optional (buf (current-buffer)))
+  "Return non-nil if Cody is active/available in this buffer.
+Currently it means the buffer is visiting a text file on disk."
+  (and (cody--alive-p)
+       (cody--text-file-p buf)))
+
 (defun cody--text-file-p (buf)
   "Return non-nil if BUF is visiting a text file.
 A heuristic to see if we should notify the agent about it."
@@ -411,5 +480,17 @@ A heuristic to see if we should notify the agent about it."
        (not
         (memq (with-current-buffer buf buffer-file-coding-system)
               '(nil raw-text binary no-conversion)))))
+
+(defun cody-request-autocomplete ()
+  "Request autocompletion for the current buffer at the current point."
+  (interactive)
+  (let* ((buf (current-buffer))
+         (file (buffer-file-name buf))
+         (line (1- (line-number-at-pos)))
+         (col (current-column)))
+    (jsonrpc-request (cody--connection)
+                     'autocomplete/execute
+                     (list :filePath file
+                           :position (list :line line :character col)))))
 
 ;;; emacs-cody.el ends here
