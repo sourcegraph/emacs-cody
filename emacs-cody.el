@@ -20,17 +20,12 @@
                      (or load-file-name
                          (buffer-file-name)))
                     "dist" "cody-agent.js")
-  "Path to distributed cody-worker.js.
+  "Path to bundled cody agent.
 Customizing `cody-worker-binary` will override this default.")
 
 (defvar cody--connection nil "")
 (defvar cody--message-in-progress nil "")
 (defvar cody--access-token nil "")
-
-(defvar cody--last-point nil "The last point position.")
-(make-variable-buffer-local 'cody--last-point)
-(defvar cody--last-mark nil "The last mark position.")
-(make-variable-buffer-local 'cody--last-mark)
 
 (defconst cody-log-buffer-name "*cody-log*" "")
 (defconst cody-chat-buffer-name "*cody-chat*" "")
@@ -77,7 +72,11 @@ or if you prefer to set up your own rules for enabling `cody-mode'."
 These hooks enable it to keep buffers and selections synced
 with the Cody Worker.")
 
-;; These is primarily for keeping the worker notified about current file/selection.")
+;; These are for keeping the worker notified about current file/selection.
+(defvar cody--last-point nil "The last point position.")
+(make-variable-buffer-local 'cody--last-point)
+(defvar cody--last-mark nil "The last mark position.")
+(make-variable-buffer-local 'cody--last-mark)
 
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;
@@ -180,7 +179,7 @@ with the Cody Worker.")
   (let ((img (cody-logo-small)))
     (if img
         (progn
-          (plist-put (cdr img) :ascent 80)  ; Update :ascent attribute to 80
+          (plist-put (cdr img) :ascent 80)  ; Raise the image up a bit.
           (list " " (propertize " " 'display img)))
       " Cody"))
   "Mode line lighter for Cody minor-mode.")
@@ -207,7 +206,7 @@ Changes to the buffer will be tracked by the Cody worker"
   "Code that runs when `code-mode' is disabled in a buffer."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
-  (setq cody-mode nil) ; does this fix the modeline?
+  (setq cody-mode nil) ; this clears the modeline and other vars
   (message "Cody mode disabled"))
 
 (defun cody--text-file-p (buf)
@@ -420,7 +419,7 @@ Cody chat buffer should be current, and params non-nil."
     (setq cody--message-in-progress new-text)))
 
 (defun cody-shutdown ()
-  "Stop the Cody worker process."
+  "Stop the Cody worker process and turn Cody off globally."
   (interactive)
   (dolist (buf (buffer-list))
     (with-current-buffer buf
@@ -482,12 +481,12 @@ there is a connection."
       (cody--init-cody-mode))))
 
 (defun cody--init-cody-mode ()
-  "Start an worker if needed, and enable Cody in applicable buffers."
+  "Start a worker if needed, and enable Cody in applicable buffers."
   ;; TODO: Add a customization option to not auto-enable cody-mode
   ;; for all buffers, and instead the user can invoke cody-mode manually
   ;; or set up their own rules for toggling it. As one example driving this
-  ;; use case, the user might only want to have a chat session open, and
-  ;; not have Cody tracking all their other buffers.
+  ;; use case, the user might only want to have a chat session open, but
+  ;; not want Cody tracking all their other buffers.
   (if cody--use-threads
       ;; N.B. Debugger is unable to exit if there's an error in the thread function.
       (make-thread (lambda ()
@@ -545,12 +544,12 @@ Query and output go into the *cody-chat* buffer."
   (let* ((buf (current-buffer))
          (file (buffer-file-name buf))
          (line (1- (line-number-at-pos)))
-         (col (current-column)))
-    ;; TODO: Process the result!
-    (jsonrpc-request (cody--connection)
-                     'autocomplete/execute
-                     (list :filePath file
-                           :position (list :line line :character col)))))
+         (col (current-column))
+         (result (jsonrpc-request (cody--connection)
+                                  'autocomplete/execute
+                                  (list :filePath file
+                                        :position (list :line line :character col)))))
+    (message "%s" result)))
 
 (defun emacs-cody-unload-function ()
   "Handle `unload-feature' for this package."
