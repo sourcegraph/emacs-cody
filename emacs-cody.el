@@ -574,7 +574,6 @@ Query and output go into the *cody-chat* buffer."
   (unless (overlayp cody--overlay)
     (let ((o (setq cody--overlay (make-overlay 1 1 nil nil t))))
       (overlay-put o 'keymap cody-completion-map)
-      (overlay-put o 'help-echo "TAB or RET to accept completion")
       (overlay-put o 'priority '(nil . 50))
       (overlay-put o 'help-echo "TAB or RET to accept completion")
       (overlay-put o 'insert-in-front-hooks '(cody--overlay-insert-front))))
@@ -617,7 +616,7 @@ Query and output go into the *cody-chat* buffer."
         (cody--display-completion result (aref item-vec 0)))
        (t
         (message "Multiple completions returned - not yet implemented")))
-    (message "Unexpected respons format: %s" result)))
+    (message "Unexpected response format: %s" result)))
 
 (defun cody--display-completion (response completion)
   "Show the server's code autocompletion suggestion.
@@ -642,6 +641,27 @@ COMPLETION, a plist, is the first item in the completions vector."
           (cody--accept-completion)
         (overlay-put cody-overlay 'after-string
                      (substring completion 1))))))
+
+(defun cody--accept-completion ()
+  "Record the completion as accepted."
+  ;; TODO:
+  ;;  - Hide and reset the overlay.
+  ;;  - Clear local variables.
+  ;;  - Update counters.
+  ;;  - Notify agent.
+  (message "cody--accept-completion: Not yet implemented"))
+
+(defun cody--accept-completion ()
+  "Record the completion as accepted."
+  ;; TODO:
+  ;;  - Update counters
+  ;;  - Notify agent
+  (cody--reset-overlay))
+
+(defun cody--reset-overlay ()
+  "Reset the completion overlay after use."
+  (setq cody--overlay nil
+        cody--completion nil))
         
 (provide 'emacs-cody)
 ;;; emacs-cody.el ends here
