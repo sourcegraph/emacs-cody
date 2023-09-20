@@ -13,15 +13,35 @@
 (require 'auth-source)
 (require 'jsonrpc)
 
-;;; TODO: Tests!
+(defgroup cody nil
+  "Sourcegraph Cody"
+  :group 'programming)
 
-(defconst cody--cody-worker
+(defcustom cody-workspace-root (getenv "HOME")
+  "Directory which Cody considers your current project root."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody-agent-binary nil
+  "Location of pre-built Cody agent binary.
+Setting this to non-nil overrides the default distributed Cody agent."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody-auto-enable-cody-mode t
+  "Non-nil to enable Cody commands in all relevant buffers.
+You can set this to nil if you need to run Cody only in a chat session,
+or if you prefer to set up your own rules for enabling `cody-mode'."
+  :group 'cody
+  :type 'boolean)
+
+(defconst cody--cody-agent
   (file-name-concat (file-name-directory
                      (or load-file-name
                          (buffer-file-name)))
                     "dist" "cody-agent.js")
   "Path to bundled cody agent.
-Customizing `cody-worker-binary` will override this default.")
+Customizing `cody-agent-binary` will override this default.")
 
 (defvar cody--connection nil "")
 (defvar cody--message-in-progress nil "")
@@ -36,33 +56,14 @@ Customizing `cody-worker-binary` will override this default.")
     map)
   "Keymap for `cody-mode'.")
 
+(defvar cody-completion-map (make-sparse-keymap)
+  "Keymap for `cody-mode'.")
+
 (defvar cody--use-threads nil
   "True to use threads; set to false for easier debugging.")
 
 (defvar cody--typewriter-effect nil
   "True to use typewriter effect in Cody chat output.")
-
-(defgroup cody nil
-  "Sourcegraph Cody coding assistant"
-  :group 'programming)
-
-(defcustom cody-workspace-root (getenv "HOME")
-  "Directory which Cody considers your current project root."
-  :group 'cody
-  :type 'string)
-
-(defcustom cody-worker-binary nil
-  "Location of pre-built Cody worker binary.
-Setting this to non-nil overrides the default distributed Cody worker."
-  :group 'cody
-  :type 'string)
-
-(defcustom cody-auto-enable-cody-mode t
-  "Non-nil to enable Cody commands in all relevant buffers.
-You can set this to nil if you need to run Cody only in a chat session,
-or if you prefer to set up your own rules for enabling `cody-mode'."
-  :group 'cody
-  :type 'boolean)
 
 (defconst cody--mode-hooks
   '((after-change-functions . cody--after-change)
@@ -70,17 +71,30 @@ or if you prefer to set up your own rules for enabling `cody-mode'."
     (post-command-hook . cody--post-command-function))
   "List of buffer-local hooks that Cody registers on in `cody-mode'.
 These hooks enable it to keep buffers and selections synced
-with the Cody Worker.")
+with the Cody Agent.")
 
-;; These are for keeping the worker notified about current file/selection.
-(defvar cody--last-point nil "The last point position.")
-(make-variable-buffer-local 'cody--last-point)
-(defvar cody--last-mark nil "The last mark position.")
-(make-variable-buffer-local 'cody--last-mark)
+(defvar-local cody--overlay nil
+  "Overlay for Cody current completion suggestion.")
+
+(defvar-local cody--completion nil
+  "Most recent completion result from Cody Agent.
+This is a plist whose `:insertText' property holds the text
+of the last suggested autocompletion.")
+
+(defface cody-completion-face
+  '((t :inherit shadow :slant italic))
+  "Face for Cody completion overlay.")
+
+(defsubst cody--completion-text ()
+  "Text of the most recent completion result."
+  (plist-get cody--completion :insertText))
+
+;; These are for keeping the agent notified about current file/selection.
+(defvar-local cody--last-point nil "The last point position.")
+(defvar-local cody--last-mark nil "The last mark position.")
 
 ;; Add to your ~/.authinfo.gpg something that looks like
-;;
-;;  machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
+;;   machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
 (defun cody--access-token ()
   "Fetch and cache the access token from ~/.authinfo.gpg"
   (or cody--access-token
@@ -99,7 +113,7 @@ with the Cody Worker.")
   ""
   (list :accessToken (cody--access-token)
         :serverEndpoint "https://sourcegraph.sourcegraph.com"
-        ;; Note there is a bug currently where the worker initialize request
+        ;; Note there is a bug currently where the agent initialize request
         ;; fails if the serverEndpoint doesn't know the codebase.
         :codebase "https://github.com/sourcegraph/cody"))
 
@@ -114,20 +128,19 @@ with the Cody Worker.")
        (zerop (process-exit-status (jsonrpc--process cody--connection)))))
 
 (defun cody--connection ()
-  "Return the worker process, starting one if it is not already running."
+  "Return the agent process, starting one if it is not already running."
   (unless (cody--alive-p)
-    (let ((cody-command (if (and (boundp 'cody-worker-binary)
-                                 (stringp 'cody-worker-binary)
-                                 (file-executable-p cody-worker-binary))
-                            (list cody-worker-binary "")
-                          ;; TODO allow overriding location of node
-                          (list "node" cody--cody-worker))))
+    (let ((cody-command (if (and (boundp 'cody-agent-binary)
+                                 (stringp cody-agent-binary)
+                                 (file-executable-p cody-agent-binary))
+                            (list cody-agent-binary "")
+                          (list "node" cody--cody-agent))))
       (setq cody--connection
             (make-instance
              'jsonrpc-process-connection
              :name "cody"
              :events-buffer-scrollback-size nil
-             :notification-dispatcher #'cody--handle-worker-notification
+             :notification-dispatcher #'cody--handle-agent-notification
              :process (make-process
                        :name "cody"
                        :command cody-command
@@ -135,10 +148,11 @@ with the Cody Worker.")
                        :connection-type 'pipe
                        :stderr (get-buffer-create "*cody stderr*")
                        :noquery t))))
-    (message "Initializing Cody worker")
+    (cody--log "Initializing Cody agent")
 
     ;; The 'initialize' request must be sent at the start of the connection
     ;; before any other request/notification is sent.
+    (cody--log "Sending 'initialize' request to agent")
     (jsonrpc-request cody--connection 'initialize
                      (list
                       :name "emacs"
@@ -172,7 +186,7 @@ with the Cody Worker.")
    ;; wtf emacs why is there no parent-directory function?
    (file-name-directory
     (directory-file-name
-     (file-name-directory cody--cody-worker)))
+     (file-name-directory cody--cody-agent)))
    file-base))
 
 (defvar cody--minor-mode-icon
@@ -188,7 +202,7 @@ with the Cody Worker.")
 
 (define-minor-mode cody-mode
   "Minor mode for interacting with the Cody coding assistant.
-Changes to the buffer will be tracked by the Cody worker"
+Changes to the buffer will be tracked by the Cody agent"
   :lighter cody--minor-mode-icon
   :keymap cody-mode-map
   (if cody-mode
@@ -199,7 +213,7 @@ Changes to the buffer will be tracked by the Cody worker"
   "Code that runs when `cody-mode' is enabled in a buffer."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil t))
-  (cody--send-file-to-worker (current-buffer) 'textDocument/didOpen)
+  (cody--send-file-to-agent (current-buffer) 'textDocument/didOpen)
   (message "Cody mode enabled"))
 
 (defun cody--minor-mode-shutdown ()
@@ -211,7 +225,7 @@ Changes to the buffer will be tracked by the Cody worker"
 
 (defun cody--text-file-p (buf)
   "Return non-nil if BUF is visiting a text file.
-A heuristic to see if we should notify the worker about it."
+A heuristic to see if we should notify the agent about it."
   ;; TODO: Maybe just ask the filesystem if it's a text file, instead?
   (and (buffer-file-name buf)
        (not
@@ -251,8 +265,8 @@ Currently it means the buffer is visiting a text file on disk."
        ;; buffer/file patterns.
        (cody--text-file-p (current-buffer))))
 
-(defun cody--send-file-to-worker (buf op)
-  "Make the jsonrpc call to notify worker of opened/changed file."
+(defun cody--send-file-to-agent (buf op)
+  "Make the jsonrpc call to notify agent of opened/changed file."
   (with-current-buffer buf
     (jsonrpc-notify (cody--connection) op
                     (list
@@ -270,16 +284,16 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
         (unwind-protect
             (progn
               ;; Dispense with optimization and just blast the whole file over. Vavoom.
-              (cody--send-file-to-worker (current-buffer)
+              (cody--send-file-to-agent (current-buffer)
                                         'textDocument/didChange)
               (setq happy t))
           (if happy
               (cody--log "Blasted whole file %s on small change" buffer-file-name)
-            (cody--log "Unable to update Cody worker for %s" buffer-file-name)))))))
+            (cody--log "Unable to update Cody agent for %s" buffer-file-name)))))))
 
 
 (defun cody--post-command-function ()
-  "If point or mark has moved, update selection/focus with worker.
+  "If point or mark has moved, update selection/focus with agent.
 Installed on `post-command-hook', which see."
   (ignore-errors
     (when cody-mode
@@ -299,7 +313,7 @@ Installed on `post-command-hook', which see."
         (cody--handle-focus-change))))
 
 (defun cody--handle-focus-change ()
-  "Notify worker that cursor or selection has changed in current buffer."
+  "Notify agent that cursor or selection has changed in current buffer."
   ;; Does not send the file contents. Olaf assured me you can leave it undefined
   ;; when you're just updating the selection or caret.
   (when cody-mode ; sanity check
@@ -330,8 +344,8 @@ The return value is appropiate for sending directly to the rpc layer."
 
 ;; See https://www.gnu.org/software/emacs/manual/html_node/elisp/JSONRPC-Overview.html
 ;; for a description of the parameters for this jsonrpc notification callback.
-(defun cody--handle-worker-notification (_ method params)
-  "Handle notifications from the worker, e.g. shutdown."
+(defun cody--handle-agent-notification (_ method params)
+  "Handle notifications from the agent, e.g. shutdown."
   (cl-case method
     (chat/updateMessageInProgress
      (cody--handle-chat-update params))
@@ -339,13 +353,13 @@ The return value is appropiate for sending directly to the rpc layer."
      (cody-shutdown))))
 
 (defun cody--kill-buffer-function ()
-  "If we are killing the last buffer visiting this file, notify worker."
+  "If we are killing the last buffer visiting this file, notify agent."
   (when (and cody-mode
              buffer-file-name
              (cody--last-buffer-for-file-p))
     (jsonrpc-notify (cody--connection) 'textDocument/didClose
                     (list :filePath buffer-file-name))
-    (cody--log "Notified worker closed %s" buffer-file-name)))
+    (cody--log "Notified agent closed %s" buffer-file-name)))
 
 (defun cody--last-buffer-for-file-p ()
   "Check if the current buffer is the last one visiting its file.
@@ -394,7 +408,7 @@ visiting its associated file."
       (if (window-live-p win)
           (set-window-point win (point-max))))))
 
-;; The worker sends an update with increasingly long hunks of the response,
+;; The agent sends an update with increasingly long hunks of the response,
 ;; e.g. "Here", "Here is", "Here is an", "Here is an explanation", ...
 ;; This permits a typewriter effect.
 (defun cody-chat-insert-msg-tail (params)
@@ -419,7 +433,7 @@ Cody chat buffer should be current, and params non-nil."
     (setq cody--message-in-progress new-text)))
 
 (defun cody-shutdown ()
-  "Stop the Cody worker process and turn Cody off globally."
+  "Stop the Cody agent process and turn Cody off globally."
   (interactive)
   (dolist (buf (buffer-list))
     (with-current-buffer buf
@@ -427,8 +441,12 @@ Cody chat buffer should be current, and params non-nil."
         (cody--minor-mode-shutdown))))
   (remove-hook 'find-file-hook #'cody--maybe-turn-on-cody-mode)
   (when (cody--alive-p)
-    (cody--request 'shutdown) ; Required by the protocol
-    (cody--kill-process)
+    (ignore-errors
+      (cody--request 'shutdown)) ; Required by the protocol
+    (ignore-errors
+      (cody--kill-process))
+    (ignore-errors ; sometimes jsonrpc doesn't clean this one up
+      (kill-buffer (get-buffer "*cody events*")))
     (message "Cody has shut down."))
   (setq cody--message-in-progress nil))
 
@@ -464,7 +482,7 @@ Cody chat buffer should be current, and params non-nil."
   (message "Cody recipe sent."))
 
 (defun cody-start (&optional quiet)
-  "Start the Cody worker. Optionally enables `cody-mode' in buffers.
+  "Start the Cody agent. Optionally enables `cody-mode' in buffers.
 This function is idempotent and only starts a new connection if needed.
 Turning on `cody-mode' is set by the `cody-auto-enable-cody-mode'
 customization option. This function essentially starts up the Cody
@@ -473,15 +491,15 @@ there is a connection."
   (interactive)
   (if (cody--alive-p)
       (unless quiet
-        (message "Cody worker is already started."))
-    (message "Initializing Cody worker...")
+        (message "Cody agent is already started."))
+    (message "Initializing Cody connection...")
     (cody--connection)
     (message "Cody connection initialized.")
     (when cody-auto-enable-cody-mode
       (cody--init-cody-mode))))
 
 (defun cody--init-cody-mode ()
-  "Start a worker if needed, and enable Cody in applicable buffers."
+  "Start an agent if needed, and enable Cody in applicable buffers."
   ;; TODO: Add a customization option to not auto-enable cody-mode
   ;; for all buffers, and instead the user can invoke cody-mode manually
   ;; or set up their own rules for toggling it. As one example driving this
@@ -493,6 +511,17 @@ there is a connection."
                      (cody--enable-cody-mode))
                    "Cody startup thread")
     (cody--enable-cody-mode)))
+
+(defun cody-restart ()
+  "Shut down and restart Cody. Mostly for debugging."
+  (interactive)
+  (ignore-errors
+    (cody-shutdown))
+  (cody-start))
+
+(defun emacs-cody-unload-function ()
+  "Handle `unload-feature' for this package."
+  (cody-shutdown))
 
 (defun cody--log (msg &rest args)
   "Log a message, currently just for debugging"
@@ -536,6 +565,21 @@ Query and output go into the *cody-chat* buffer."
           (markdown-mode))
         (current-buffer)))))
 
+(defun cody--overlay-visible-p ()
+  "Return non-nil if Cody is displaying a suggestion in the current buffer."
+  (and (overlayp cody--overlay) cody--completion))
+
+(defun cody--overlay ()
+  "Get Cody completion overlay, creating if needed."
+  (unless (overlayp cody--overlay)
+    (let ((o (setq cody--overlay (make-overlay 1 1 nil nil t))))
+      (overlay-put o 'keymap cody-completion-map)
+      (overlay-put o 'help-echo "TAB or RET to accept completion")
+      (overlay-put o 'priority '(nil . 50))
+      (overlay-put o 'help-echo "TAB or RET to accept completion")
+      (overlay-put o 'insert-in-front-hooks '(cody--overlay-insert-front))))
+  cody--overlay)
+
 (defun cody-request-completion ()
   "Request autocompletion for the current buffer at the current point."
   (interactive)
@@ -549,12 +593,55 @@ Query and output go into the *cody-chat* buffer."
                                   'autocomplete/execute
                                   (list :filePath file
                                         :position (list :line line :character col)))))
-    (message "%s" result)))
+    (cody--handle-completion-result result)))
 
-(defun emacs-cody-unload-function ()
-  "Handle `unload-feature' for this package."
-  (cody-shutdown))
+(defun cody--handle-completion-result (result)
+  "Dispatches completion result based on jsonrpc reply."
+  ;; I got this from issuing a completion request just below this function:
+  ;; '(:items [(:insertText "(defun cody-shutdown ()"
+  ;;            :range (:start (:line 564 :character 0)
+  ;;                    :end (:line 564 :character 0)))]
+  ;;          :completionEvent (:params
+  ;;                             (:multiline :json-false
+  ;;                              :providerIdentifier anthropic
+  ;;                              ;; Many more params...
+  ;;                              )))
+  ;; The completions come back in an array/vector.
+  (if-let* ((item-vec (plist-get result :items))
+            (_ (vectorp item-vec))
+            (count (length item-vec)))
+      (cond
+       ((zerop count)
+        (message "No completions returned"))
+       ((= 1 count)
+        (cody--display-completion result (aref item-vec 0)))
+       (t
+        (message "Multiple completions returned - not yet implemented")))
+    (message "Unexpected respons format: %s" result)))
 
+(defun cody--display-completion (response completion)
+  "Show the server's code autocompletion suggestion.
+RESPONSE is the entire jsonrpc response.
+COMPLETION, a plist, is the first item in the completions vector."
+  ;; TODO: Currently we only support single-line, single-suggestion.
+  (when-let* ((suggestion (plist-get completion :insertText))
+              (o (cody--overlay))
+              (text (propertize suggestion 'face 'cody-completion-face)))
+    (move-overlay o (point) (point))
+    (overlay-put o 'after-string text)))
+
+(defun cody--overlay-insert-front (overlay after beg end &optional len)
+  "Allow user to type over the overlay character by character."
+  (when (and after ; after text has been inserted/deleted
+             (cody--overlay-visible-p)
+             (zerop len)) ; This was an insertion, not a deletion.
+    (let ((new-char (char-at beg))
+          (completion (cody--completion-text)))
+      (if (= 1 (length completion))
+          ;; If only 1 char long, always accept when they type into it.
+          (cody--accept-completion)
+        (overlay-put cody-overlay 'after-string
+                     (substring completion 1))))))
+        
 (provide 'emacs-cody)
-
 ;;; emacs-cody.el ends here
