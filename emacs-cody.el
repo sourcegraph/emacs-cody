@@ -22,12 +22,6 @@
   :group 'cody
   :type 'string)
 
-(defcustom cody-agent-binary nil
-  "Location of pre-built Cody agent binary.
-Setting this to non-nil overrides the default distributed Cody agent."
-  :group 'cody
-  :type 'string)
-
 (defcustom cody-auto-enable-cody-mode t
   "Non-nil to enable Cody commands in all relevant buffers.
 You can set this to nil if you need to run Cody only in a chat session,
@@ -40,8 +34,11 @@ or if you prefer to set up your own rules for enabling `cody-mode'."
                      (or load-file-name
                          (buffer-file-name)))
                     "dist" "cody-agent.js")
-  "Path to bundled cody agent.
-Customizing `cody-agent-binary` will override this default.")
+  "Path to bundled cody agent.")
+
+(defvar cody-agent-command
+  (list "node" cody--cody-agent)
+  "Command and arguments for running agent.")
 
 (defvar cody--connection nil "")
 (defvar cody--message-in-progress nil "")
@@ -130,24 +127,19 @@ of the last suggested autocompletion.")
 (defun cody--connection ()
   "Return the agent process, starting one if it is not already running."
   (unless (cody--alive-p)
-    (let ((cody-command (if (and (boundp 'cody-agent-binary)
-                                 (stringp cody-agent-binary)
-                                 (file-executable-p cody-agent-binary))
-                            (list cody-agent-binary "")
-                          (list "node" cody--cody-agent))))
-      (setq cody--connection
-            (make-instance
-             'jsonrpc-process-connection
-             :name "cody"
-             :events-buffer-scrollback-size nil
-             :notification-dispatcher #'cody--handle-agent-notification
-             :process (make-process
-                       :name "cody"
-                       :command cody-command
-                       :coding 'utf-8-emacs-unix
-                       :connection-type 'pipe
-                       :stderr (get-buffer-create "*cody stderr*")
-                       :noquery t))))
+    (setq cody--connection
+          (make-instance
+           'jsonrpc-process-connection
+           :name "cody"
+           :events-buffer-scrollback-size nil
+           :notification-dispatcher #'cody--handle-agent-notification
+           :process (make-process
+                     :name "cody"
+                     :command cody-agent-command
+                     :coding 'utf-8-emacs-unix
+                     :connection-type 'pipe
+                     :stderr (get-buffer-create "*cody stderr*")
+                     :noquery t)))
     (cody--log "Initializing Cody agent")
 
     ;; The 'initialize' request must be sent at the start of the connection
@@ -158,7 +150,7 @@ of the last suggested autocompletion.")
                       :name "emacs"
                       :version "0.1"
                       :workspaceRootPath (cody--workspace-root)
-                      :connectionConfiguration (cody--connection-configuration)))
+                      :extensionConfiguration (cody--connection-configuration)))
 
     ;; The 'initialized' notification must be sent after receiving the
     ;; 'initialize' response.
