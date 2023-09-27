@@ -58,3 +58,33 @@ it down and remove all traces with =*M-x cody-force-unload*=.
 
 Alternatively run =list-processes= and select the buffer. You can also
 shut down cody by hitting =d= on the cody process.
+
+
+* Attaching with a Debugger
+
+Start by binding =*cody-agent-command*= to a list like this one,
+which points to the path of the agent that you have cloned.
+
+#+begin_src emacs-lisp
+  (setq cody-agent-command
+        (list "node"
+              "/Users/stevey/src/sg/cody/agent/dist/index.js"
+              ""))
+#+end_src
+
+Restart Cody, e.g. with =*M-x cody-restart*=, and then verify that
+Cody is running the version of the agent you specified.
+
+#+begin_src sh
+  $ ps aux | grep node
+  stevey           31174   0.0  0.3 420886240 171792   ??  Ss    4:08PM 0:00.88 /Users/stevey/.asdf/installs/nodejs/20.4.0/bin/node /Users/stevey/src/sg/cody/agent/dist/index.js 
+#+end_src
+
+Once it is correct, send a sigusr1 to the pid of the node process, 
+and it will listen for a debugger to attach.
+
+#+begin_src sh
+  $ kill -USR1 31174
+#+end_src
+
+Now you can attach with =*chrome://inspect*= or with VSCode's debugger.
