@@ -288,9 +288,8 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
                                         'textDocument/didChange)
               (setq happy t))
           (if happy
-              (cody--log "Blasted whole file %s on small change" buffer-file-name)
+              (cody--log "Sent file %s on change" buffer-file-name)
             (cody--log "Unable to update Cody agent for %s" buffer-file-name)))))))
-
 
 (defun cody--post-command-function ()
   "If point or mark has moved, update selection/focus with agent.
@@ -415,7 +414,6 @@ visiting its associated file."
   "Insert only the most recent update to the message output.
 This allows you to see the output stream in as it is generated.
 Cody chat buffer should be current, and params non-nil."
-  ;; TODO: Generated markdown breaks with this approach.
   (let* ((old-text cody--message-in-progress)
          (new-text (plist-get params :displayText))
          (tail
@@ -561,8 +559,7 @@ Query and output go into the *cody-chat* buffer."
         (let ((inhibit-modification-hooks t))
           (insert-image (cody-logo) "Cody")
           (insert "Welcome to Cody. Type `M-x cody-help` for more info.\n")
-          (set-buffer-modified-p nil)
-          (markdown-mode))
+          (set-buffer-modified-p nil))
         (current-buffer)))))
 
 (defun cody--overlay-visible-p ()
@@ -651,8 +648,8 @@ COMPLETION, a plist, is the first item in the completions vector."
   ;;  - Notify agent.
   (message "cody--accept-completion: Not yet implemented"))
 
-(defun cody--accept-completion ()
-  "Record the completion as accepted."
+(defun cody--reject-completion ()
+  "Record the completion as rejected."
   ;; TODO:
   ;;  - Update counters
   ;;  - Notify agent

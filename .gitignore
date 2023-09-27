@@ -1,2 +1,3 @@
 .envrc
 *.elc
+dist/index.js.map
