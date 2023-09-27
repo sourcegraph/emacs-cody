@@ -580,7 +580,8 @@ Query and output go into the *cody-chat* buffer."
          (result (jsonrpc-request (cody--connection)
                                   'autocomplete/execute
                                   (list :filePath file
-                                        :position (list :line line :character col)))))
+                                        :position (list :line line :character col)
+                                        :triggerKind "Invoke"))))
     (cody--handle-completion-result result)))
 
 (defun cody--handle-completion-result (result)
