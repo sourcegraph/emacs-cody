@@ -72,19 +72,30 @@ which points to the path of the agent that you have cloned.
               ""))
 #+end_src
 
+This will allow you to rebuild and reattach in a tight dev loop.
+
 Restart Cody, e.g. with =*M-x cody-restart*=, and then verify that
-Cody is running the version of the agent you specified.
+Cody is running the version of the agent in =*cody-agent-command*=.
 
 #+begin_src sh
   $ ps aux | grep node
   stevey           31174   0.0  0.3 420886240 171792   ??  Ss    4:08PM 0:00.88 /Users/stevey/.asdf/installs/nodejs/20.4.0/bin/node /Users/stevey/src/sg/cody/agent/dist/index.js 
 #+end_src
 
-Once it is correct, send a sigusr1 to the pid of the node process, 
-and it will listen for a debugger to attach.
+To have it listen for the debugger to attach, you can either run
+the script =*./bin/debug-cody*=, or send the sigusr1 to the pid of
+the node process yourself like so:
 
 #+begin_src sh
   $ kill -USR1 31174
 #+end_src
 
+Either way, your Agent should now be listening for a debugger.
+
 Now you can attach with =*chrome://inspect*= or with VSCode's debugger.
+
+You should also =*(setq jsonrpc-default-request-timeout 500)*= to ensure
+that the jsonrpc calls don't time out while you're paused at breakpoints.
+
+N.B. Cody in Emacs does not yet use threads, so if you hit a breakpoint,
+Emacs will lock up until you continue or detach the debugger.
