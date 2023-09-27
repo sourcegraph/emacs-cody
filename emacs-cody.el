@@ -37,7 +37,7 @@ or if you prefer to set up your own rules for enabling `cody-mode'."
   "Path to bundled cody agent.")
 
 (defvar cody-agent-command
-  (list "node" cody--cody-agent)
+  (list "node" cody--cody-agent "")
   "Command and arguments for running agent.")
 
 (defvar cody--connection nil "")
