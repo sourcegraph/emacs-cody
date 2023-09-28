@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'auth-source)
 (require 'jsonrpc)
+(eval-when-compile (require 'subr-x))
 
 (defgroup cody nil
   "Sourcegraph Cody"
@@ -23,6 +24,7 @@
   :type 'string)
 
 (defcustom cody-auto-enable-cody-mode t
+
   "Non-nil to enable Cody commands in all relevant buffers.
 You can set this to nil if you need to run Cody only in a chat session,
 or if you prefer to set up your own rules for enabling `cody-mode'."
@@ -36,9 +38,20 @@ or if you prefer to set up your own rules for enabling `cody-mode'."
                     "dist" "cody-agent.js")
   "Path to bundled cody agent.")
 
-(defvar cody-agent-command
-  (list "node" cody--cody-agent "")
-  "Command and arguments for running agent.")
+(defconst cody--node-min-version "20.4.0"
+  "The minimum required version of node.js for Cody.")
+
+(defvar cody--node-version-status nil
+  "Non-nil after `cody--check-node-version' is called.
+The node version is only checked on Cody startup.
+You can call `cody-restart' to force it to re-check the version.")
+
+(defvar cody-node-path-override nil
+  "Hardwired path to the node.js binary to use for Cody.")
+
+(defun cody--agent-command ()
+  "Command and arguments for running agent."
+  (list (or cody-node-path-override "node") cody--cody-agent ""))
 
 (defvar cody--connection nil "")
 (defvar cody--message-in-progress nil "")
@@ -106,8 +119,8 @@ of the last suggested autocompletion.")
                        :host "sourcegraph.sourcegraph.com"
                        :require '(:secret :host))))))
 
-(defun cody--connection-configuration ()
-  ""
+(defun cody--extension-configuration ()
+  "Which `ExtensionConfiguration' parameters to send on Agent handshake."
   (list :accessToken (cody--access-token)
         :serverEndpoint "https://sourcegraph.sourcegraph.com"
         ;; Note there is a bug currently where the agent initialize request
@@ -122,6 +135,7 @@ of the last suggested autocompletion.")
 (defun cody--alive-p ()
   "Return non-nil if the jsonrpc connection is still running."
   (and cody--connection
+       (cody--check-node-version)
        (zerop (process-exit-status (jsonrpc--process cody--connection)))))
 
 (defun cody--connection ()
@@ -150,12 +164,49 @@ of the last suggested autocompletion.")
                       :name "emacs"
                       :version "0.1"
                       :workspaceRootPath (cody--workspace-root)
-                      :extensionConfiguration (cody--connection-configuration)))
+                      :extensionConfiguration (cody--extension-configuration)))
 
     ;; The 'initialized' notification must be sent after receiving the
     ;; 'initialize' response.
     (jsonrpc-notify cody--connection 'initialized nil))
   cody--connection)
+
+(defcustom cody--node-min-version "20.4.0"
+  "The minimum required version of Node.js."
+  :type 'string
+  :group 'cody)
+
+(defun cody--check-node-version ()
+  "Signal an error the default node.js is not a high enough version.
+Version is configurable with `cody--node-min-version'."
+  (cl-case cody--node-version-status
+    (good t)
+    (bad (error "Installed Node.js must be at least %s - see `cody-node-path-override'"
+                cody--node-min-version))
+    (otherwise
+     (let* ((cmd (concat (or cody-node-path-override "node") " -v"))
+            (node-version (string-trim (shell-command-to-string cmd)))
+            minor major patch)
+       (if (not (string-match "^v\\([0-9]+\\)\\.\\([0-9]+\\)\\.\\([0-9]+\\)"
+                              node-version))
+           (progn
+             (message "Error: Could not parse node.js version string: %s" node-version)
+             nil)
+         (setq major (string-to-number (match-string 1 node-version))
+               minor (string-to-number (match-string 2 node-version))
+               patch (string-to-number (match-string 3 node-version)))
+         (let* ((min-version-parts (split-string cody--node-min-version "\\."))
+                (min-major (string-to-number (nth 0 min-version-parts)))
+                (min-minor (string-to-number (nth 1 min-version-parts)))
+                (min-patch (string-to-number (nth 2 min-version-parts))))
+           (if (or (> major min-major)
+                   (and (= major min-major) (> minor min-minor))
+                   (and (= major min-major) (= minor min-minor) (>= patch min-patch)))
+               (setq cody--node-version-status 'good)
+             (setq cody--node-version-status 'bad)
+             (error
+              "Error: Installed Node.js version %s is lower than min version %s"
+              node-version cody--node-min-version))))))))
 
 (defun cody--workspace-root ()
   ;; TODO: Onboarding!
@@ -270,6 +321,7 @@ Currently it means the buffer is visiting a text file on disk."
 (defun cody--after-change (&rest _)
   "Implement `textDocument/didChange' notification.
 Installed on `after-change-functions' buffer-local hook in `cody-mode'."
+  ;; TODO:  This appears to be sent twice per modification; debugger hits bkpt 2x.
   (ignore-errors
     (when cody-mode
       (let ((happy nil))
@@ -438,7 +490,9 @@ Cody chat buffer should be current, and params non-nil."
     (ignore-errors ; sometimes jsonrpc doesn't clean this one up
       (kill-buffer (get-buffer "*cody events*")))
     (message "Cody has shut down."))
-  (setq cody--message-in-progress nil))
+  (setq cody--message-in-progress nil
+        ;; Force re-check of node version on Cody startup.
+        cody--node-version-status nil))
 
 (defun cody-force-unload ()
   "Shut down Cody and remove all Cody-related buffers."
@@ -482,6 +536,7 @@ there is a connection."
   (if (cody--alive-p)
       (unless quiet
         (message "Cody agent is already started."))
+    (setq cody--node-version-status nil) ; re-check node version on start
     (message "Initializing Cody connection...")
     (cody--connection)
     (message "Cody connection initialized.")
@@ -505,8 +560,10 @@ there is a connection."
 (defun cody-restart ()
   "Shut down and restart Cody. Mostly for debugging."
   (interactive)
-  (ignore-errors
-    (cody-shutdown))
+  (let ((cody--node-version-status 'good))
+    (ignore-errors
+      (cody-shutdown)))
+  (setq cody--node-version-status nil)
   (cody-start))
 
 (defun emacs-cody-unload-function ()
@@ -585,16 +642,6 @@ Query and output go into the *cody-chat* buffer."
 
 (defun cody--handle-completion-result (result)
   "Dispatches completion result based on jsonrpc reply."
-  ;; I got this from issuing a completion request just below this function:
-  ;; '(:items [(:insertText "(defun cody-shutdown ()"
-  ;;            :range (:start (:line 564 :character 0)
-  ;;                    :end (:line 564 :character 0)))]
-  ;;          :completionEvent (:params
-  ;;                             (:multiline :json-false
-  ;;                              :providerIdentifier anthropic
-  ;;                              ;; Many more params...
-  ;;                              )))
-  ;; The completions come back in an array/vector.
   (if-let* ((item-vec (plist-get result :items))
             (_ (vectorp item-vec))
             (count (length item-vec)))
@@ -651,6 +698,20 @@ COMPLETION, a plist, is the first item in the completions vector."
   "Reset the completion overlay after use."
   (setq cody--overlay nil
         cody--completion nil))
-        
+
+(defun cody-dashboard ()
+  "Show a console with data about Cody configuration and usage."
+  (interactive)
+  ;; TODO: Lots more information here.
+  (let ((buf (get-buffer-create "*cody-dashboard*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t)
+            (inhibit-modification-hooks t))
+        (erase-buffer)
+        (if (cody--alive-p)
+            (insert "Cody is connected")
+          (insert "Cody is not connected"))))
+    (pop-to-buffer buf)))
+
 (provide 'emacs-cody)
 ;;; emacs-cody.el ends here
