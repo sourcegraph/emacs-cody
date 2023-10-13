@@ -8,6 +8,10 @@
 ;; URL: https://github.com/keegancsmith/emacs-cody
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16"))
 
+
+;;; Commentary:
+;; Load this package and then add `(cody-start)' to your .emacs
+
 ;;; Code:
 (require 'cl-lib)
 (require 'auth-source)
@@ -15,7 +19,7 @@
 (eval-when-compile (require 'subr-x))
 
 (defgroup cody nil
-  "Sourcegraph Cody"
+  "Sourcegraph Cody."
   :group 'programming)
 
 (defcustom cody-workspace-root (getenv "HOME")
@@ -24,10 +28,26 @@
   :type 'string)
 
 (defcustom cody-auto-enable-cody-mode t
-
   "Non-nil to enable Cody commands in all relevant buffers.
 You can set this to nil if you need to run Cody only in a chat session,
 or if you prefer to set up your own rules for enabling `cody-mode'."
+  :group 'cody
+  :type 'boolean)
+
+(defcustom cody-enable-completion-cycling t
+  "Non-nil to allow cycling among alternative completion suggestions.
+These are not always available, but when they are, you can cycle
+between them with `cody-next-completion' and `cody-prev-completion'.
+When nil, cycling is completely disabled, and only the first option
+returned by the server is ever displayed or interactible."
+  :group 'cody
+  :type 'boolean)
+
+(defcustom cody-enable-completion-cycling-help t
+  "Non-nil to show a message in the minibuffer for cycling completions.
+If non-nil, and multiple completion suggestions are returned from the
+server, it will show how many are available and how to cycle them.
+If nil, no messages are printed when cycling is available or used."
   :group 'cody
   :type 'boolean)
 
@@ -53,27 +73,33 @@ You can call `cody-restart' to force it to re-check the version.")
   "Command and arguments for running agent."
   (list (or cody-node-path-override "node") cody--cody-agent ""))
 
-(defvar cody--connection nil "")
-(defvar cody--message-in-progress nil "")
-(defvar cody--access-token nil "")
+(defvar cody--connection nil "Global jsonrpc connection to Agent.")
+(defvar cody--message-in-progress nil "Chat message accumulator.")
+(defvar cody--access-token nil "LLM access token.")
 
-(defconst cody-log-buffer-name "*cody-log*" "")
-(defconst cody-chat-buffer-name "*cody-chat*" "")
+(defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
+(defconst cody-chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
 
 (defvar cody-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c c") 'cody-request-completion)
+    (define-key map (kbd "TAB") 'cody--tab-key)
+    (define-key map (kbd "C-g") 'cody--ctrl-g-key)
+    (define-key map (kbd "ESC ESC ESC") 'cody--ctrl-g-key)
+    (when cody-enable-completion-cycling
+      (define-key map (kbd "M-n") 'cody-next-completion)
+      (define-key map (kbd "M-p") 'cody-prev-completion))
     map)
   "Keymap for `cody-mode'.")
 
 (defvar cody-completion-map (make-sparse-keymap)
-  "Keymap for `cody-mode'.")
+  "Keymap for cody overlay.")
 
 (defvar cody--use-threads nil
-  "True to use threads; set to false for easier debugging.")
+  "Non-nil to use threads; set to false for easier debugging.")
 
 (defvar cody--typewriter-effect nil
-  "True to use typewriter effect in Cody chat output.")
+  "Non-nil to use typewriter effect in Cody chat output.")
 
 (defconst cody--mode-hooks
   '((after-change-functions . cody--after-change)
@@ -89,24 +115,49 @@ with the Cody Agent.")
 (defvar-local cody--completion nil
   "Most recent completion result from Cody Agent.
 This is a plist whose `:insertText' property holds the text
-of the last suggested autocompletion.")
+of the last suggested autocompletion.  It can be overridden
+by a `:displayText' property on the same plist; the `:insertText'
+property should be considered immutable.")
 
-(defface cody-completion-face
-  '((t :inherit shadow :slant italic))
-  "Face for Cody completion overlay.")
-
-(defsubst cody--completion-text ()
-  "Text of the most recent completion result."
-  (plist-get cody--completion :insertText))
+(defvar-local cody--completion-response nil
+  "Most recent completion `jsonrpc' response from Cody.")
 
 ;; These are for keeping the agent notified about current file/selection.
 (defvar-local cody--last-point nil "The last point position.")
 (defvar-local cody--last-mark nil "The last mark position.")
 
+(defvar-local cody--last-index nil
+  "Index of Last displayed completion alternative.")
+
+(defface cody-completion-face
+  '((t :inherit shadow :slant italic))
+  "Face for Cody completion overlay.")
+
+(defsubst cody--completion-text (&optional completion)
+  "Text of the most recent COMPLETION result."
+  (let ((c (or completion cody--completion)))
+    (or (plist-get c :displayText)   ; updated via user mutations
+        (plist-get c :insertText)))) ; original from RPC
+
+(defsubst cody--completion-alternatives ()
+  "Return the list of alternatives from the last completion response.
+It is a vector of plists, one per completion alternative.
+Returns nil if there is no current completion being displayed."
+  (plist-get cody--completion-response :items))
+
+(defsubst cody--trim-leading (s)
+  "Trim leading whitespace from S."
+  (replace-regexp-in-string "^\\s-+" "" s))
+
+(defsubst cody--completion-set-prop (prop value)
+  "Mutate the completion by setting plist PROP to VALUE.
+Useful for recording metadata for the completion during its lifecycle."
+  (setq cody--completion (plist-put cody--completion prop value)))
+
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;   machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
 (defun cody--access-token ()
-  "Fetch and cache the access token from ~/.authinfo.gpg"
+  "Fetch and cache the access token from ~/.authinfo.gpg."
   (or cody--access-token
       ;; We are looking for an API key, so look for the first entry
       ;; where the secret starts with sgp_
@@ -209,8 +260,8 @@ Version is configurable with `cody--node-min-version'."
               node-version cody--node-min-version))))))))
 
 (defun cody--workspace-root ()
-  ;; TODO: Onboarding!
-  ;; For now, you can configure cody-workspace-root to your project dir.
+  "Return the workspace root for the Agent.
+You can override it with `cody-workspace-root'."
   (or cody-workspace-root
       (and buffer-file-name (file-name-directory buffer-file-name))
       (getenv "HOME")))
@@ -253,14 +304,14 @@ Changes to the buffer will be tracked by the Cody agent"
     (cody--minor-mode-shutdown)))
 
 (defun cody--minor-mode-startup ()
-  "Code that runs when `cody-mode' is enabled in a buffer."
+  "Code to run when `cody-mode' is enabled in a buffer."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil t))
   (cody--send-file-to-agent (current-buffer) 'textDocument/didOpen)
   (message "Cody mode enabled"))
 
 (defun cody--minor-mode-shutdown ()
-  "Code that runs when `code-mode' is disabled in a buffer."
+  "Code to run when `code-mode' is disabled in a buffer."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
   (setq cody-mode nil) ; this clears the modeline and other vars
@@ -319,9 +370,9 @@ Currently it means the buffer is visiting a text file on disk."
                      :selection (cody--get-selection buf)))))
 
 (defun cody--after-change (&rest _)
-  "Implement `textDocument/didChange' notification.
+  "Implement the `textDocument/didChange' notification.
 Installed on `after-change-functions' buffer-local hook in `cody-mode'."
-  ;; TODO:  This appears to be sent twice per modification; debugger hits bkpt 2x.
+  ;; N.B. Emacs calls this on every keystroke as you type, and also on other mods.
   (ignore-errors
     (when cody-mode
       (let ((happy nil))
@@ -344,6 +395,8 @@ Installed on `post-command-hook', which see."
 
 (defun cody--debuggable-post-command ()
   "Set your breakpoint for `cody--post-command-function` here instead."
+  (ignore-errors ; Fail somewhat gracefully here; completion will eventually die.
+    (cody--maybe-clear-completion))
   (let ((point-unequal (neq cody--last-point (point)))
         ;; If the mark isn't set (nil), we pretend it is set at point,
         ;; yielding a zero-width range for the current selection.
@@ -368,7 +421,7 @@ Installed on `post-command-hook', which see."
 
 (defun cody--get-selection (buf)
   "Return the jsonrpc parameters representing the selection in BUF.
-BUF can be a buffer or buffer-name, and we return a Range with `start'
+BUF can be a buffer or buffer name, and we return a Range with `start'
 and `end' parameters, each a Position of 1-indexed `line' and `character'.
 The return value is appropiate for sending directly to the rpc layer."
   (cl-flet ((pos-parameters (pos)
@@ -417,6 +470,7 @@ visiting its associated file."
                     (buffer-list))))))
 
 (defun cody--handle-chat-update (params)
+  "Handler for `chat/updateMessageInProgress'."
   (message nil) ; clear the "Awaiting Cody response..." message
   (if cody--typewriter-effect
       (if params
@@ -457,7 +511,7 @@ visiting its associated file."
 (defun cody-chat-insert-msg-tail (params)
   "Insert only the most recent update to the message output.
 This allows you to see the output stream in as it is generated.
-Cody chat buffer should be current, and params non-nil."
+Cody chat buffer should be current, and PARAMS non-nil."
   (let* ((old-text cody--message-in-progress)
          (new-text (plist-get params :displayText))
          (tail
@@ -504,6 +558,7 @@ Cody chat buffer should be current, and params non-nil."
     (kill-buffer cody-log-buffer-name)))
 
 (defun cody--kill-process ()
+  "Shut down the jsonrpc connection."
   (when cody--connection
     (ignore-errors
       (jsonrpc-shutdown cody--connection 'cleanup-buffers))
@@ -558,7 +613,7 @@ there is a connection."
     (cody--enable-cody-mode)))
 
 (defun cody-restart ()
-  "Shut down and restart Cody. Mostly for debugging."
+  "Shut down and restart Cody.  Mostly for debugging."
   (interactive)
   (let ((cody--node-version-status 'good))
     (ignore-errors
@@ -571,7 +626,7 @@ there is a connection."
   (cody-shutdown))
 
 (defun cody--log (msg &rest args)
-  "Log a message, currently just for debugging"
+  "Log MSG with ARGS, currently just for debugging."
   ;; TODO: Use a real logging package
   (with-current-buffer (get-buffer-create cody-log-buffer-name)
     (goto-char (point-max))
@@ -591,7 +646,7 @@ Query and output go into the *cody-chat* buffer."
   (message "Awaiting response from Cody..."))
 
 (defun cody-chat-insert-query (query)
-  "Insert the user query into the chat output buffer."
+  "Insert the user QUERY into the chat output buffer."
   (with-current-buffer (cody-chat-buffer)
     (goto-char (point-max))
     (cody-chat-insert "> " query "\n\n")
@@ -613,7 +668,12 @@ Query and output go into the *cody-chat* buffer."
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (and (overlayp cody--overlay) cody--completion))
+  (and cody--completion
+       (overlayp cody--overlay)
+       ;; Make sure we have set a nonzero-length string as the visible string.
+       ;; Otherwise the overlay may be hidden. We could also check that it's at bob,
+       ;; but that would lead to false positives in completing in an empty buffer.
+       (plusp (length (overlay-get cody--overlay 'after-string)))))
 
 (defun cody--overlay ()
   "Get Cody completion overlay, creating if needed."
@@ -621,12 +681,46 @@ Query and output go into the *cody-chat* buffer."
     (let ((o (setq cody--overlay (make-overlay 1 1 nil nil t))))
       (overlay-put o 'keymap cody-completion-map)
       (overlay-put o 'priority '(nil . 50))
-      (overlay-put o 'help-echo "TAB or RET to accept completion")
+      (overlay-put o 'help-echo "TAB to accept")
       (overlay-put o 'insert-in-front-hooks '(cody--overlay-insert-front))))
   cody--overlay)
 
+(defun cody--point-at-overlay-p (&optional fuzzy)
+  "Return non-nil if point is at the start of a completion suggestion.
+If FUZZY is non-nil, returns non-nil if there is only whitespace between
+point and the start of the completion."
+  (and cody-mode
+       (cody--overlay-visible-p)
+       (let ((beg (overlay-start cody--overlay)))
+         (if fuzzy
+             (save-excursion
+               (save-match-data
+                 (string-match-p "\\`[[:space:]\r]*\\'"
+                                 (buffer-substring (point) beg))))
+           (= beg (point)))))) ; strict
+
+(defmacro cody--call-if-at-overlay (func key &optional fuzzy)
+  "If point is at the start of the completion overlay, invoke FUNC.
+Otherwise, call the default non-Cody key binding for KEY.
+If FUZZY is non-nil, then the check ignores whitespace between point
+and the start of the overlay."
+  `(if (cody--point-at-overlay-p ,fuzzy)
+       (funcall ,func)
+     (let (cody-mode) ; avoid recursion
+       (call-interactively (key-binding (kbd ,key))))))
+
+(defun cody--tab-key ()
+  "Handler for TAB key."
+  (interactive)
+  (cody--call-if-at-overlay 'cody--accept-completion "TAB"))
+
+(defun cody--ctrl-g-key ()
+  "Handler for quit; clears/rejects the completion suggestion."
+  (interactive)
+  (cody--call-if-at-overlay 'cody--reject-completion "C-g" 'fuzzy))
+
 (defun cody-request-completion ()
-  "Request autocompletion for the current buffer at the current point."
+  "Request manual autocompletion in current buffer at point."
   (interactive)
   (unless cody-mode
     (error "Cody-mode not enabled in this buffer."))
@@ -641,53 +735,100 @@ Query and output go into the *cody-chat* buffer."
                                         :triggerKind "Invoke"))))
     (cody--handle-completion-result result)))
 
-(defun cody--handle-completion-result (result)
-  "Dispatches completion result based on jsonrpc reply."
-  (if-let* ((item-vec (plist-get result :items))
+(defun cody--handle-completion-result (response)
+  "Dispatches completion result based on jsonrpc RESPONSE."
+  (if-let* ((item-vec (plist-get response :items))
             (_ (vectorp item-vec))
             (count (length item-vec)))
       (cond
        ((zerop count)
         (message "No completions returned"))
-       ((= 1 count)
-        (cody--display-completion result (aref item-vec 0)))
        (t
-        (message "Multiple completions returned - not yet implemented")))
-    (message "Unexpected response format: %s" result)))
+        (cody--set-completion (aref item-vec 0) response)
+        (cody--display-completion 0)))
+    (message "Unexpected response format: %s" response)))
 
-(defun cody--display-completion (response completion)
+(defun cody--set-completion (completion &optional response)
+  "Set a new COMPLETION, from any source, deleting any existing one(s).
+If RESPONSE is not passed in, it is retained, e.g. when cycling completions."
+  (cody--reset-overlay)
+  (setq cody--completion completion)
+  (when response
+    (setq cody--completion-response response)))
+
+(defun cody--display-completion (index)
   "Show the server's code autocompletion suggestion.
 RESPONSE is the entire jsonrpc response.
-COMPLETION, a plist, is the first item in the completions vector."
-  ;; TODO: Currently we only support single-line, single-suggestion.
-  (when-let* ((suggestion (plist-get completion :insertText))
-              (o (cody--overlay))
-              (text (propertize suggestion 'face 'cody-completion-face)))
-    (move-overlay o (point) (point))
-    (overlay-put o 'after-string text)))
+INDEX is the completion alternative to display from RESPONSE."
+  (when-let ((text (cody--completion-text)))
+    (setq cody--last-index index)
+    (cody--overlay-set-text (cody--trim-leading text))
+    (when (and cody-enable-completion-cycling-help
+               (cody--multiple-alternatives-p))
+      (message "Showing suggestion %s of %s (M-n/M-p to cycle)"
+               (1+ index) (length (cody--completion-alternatives))))))
+
+(defun cody--overlay-set-text (text)
+  "Update overlay TEXT and redisplay it at point."
+  ;; Record it, since 'after-string is cleared if we hide the completion.
+  (cody--completion-set-prop :displayText text)
+  (let ((pretty-text (propertize text 'face 'cody-completion-face)))
+    (put-text-property 0 1 'cursor t pretty-text)
+    (overlay-put (cody--overlay) 'after-string pretty-text))
+  (cody--move-overlay (point) (point)))
+
+(defun cody--move-overlay (beg end)
+  "Safely move cody overlay to BEG and END, creating it if needed."
+  (save-excursion
+    (move-overlay (cody--overlay) beg end)))
 
 (defun cody--overlay-insert-front (overlay after beg end &optional len)
   "Allow user to type over the overlay character by character."
-  (when (and after ; after text has been inserted/deleted
-             (cody--overlay-visible-p)
-             (zerop len)) ; This was an insertion, not a deletion.
-    (let ((new-char (char-at beg))
-          (completion (cody--completion-text)))
-      (if (= 1 (length completion))
-          ;; If only 1 char long, always accept when they type into it.
-          (cody--accept-completion)
-        (overlay-put cody-overlay 'after-string
-                     (substring completion 1))))))
+  (save-excursion
+    (when (and after
+               (cody--overlay-visible-p)
+               (numberp len)
+               (zerop len)) ; Length 0 means it is an insertion.
+      (let* ((text (cody--completion-text))
+             (c (char-after beg))) ; char they just typed
+        (cond
+         ((!= c (aref text 0)) ; typed something different
+          (unless (eq (char-syntax c) ?\s)
+            (cody--hide-completion))) ; hide if not whitespace
+         ((= 1 (length text))
+          (cody--accept-completion)) ; fully consumed
+         (t
+          (cody--shorten-completion)))))))
+
+(defun cody--shorten-completion ()
+  "Consume the first character of the current completion."
+  (let* ((completion cody--completion)
+         (text (cody--completion-text completion))
+         (shortened (substring text 1)))
+    (cody--overlay-set-text shortened)))
+
+(defun cody--hide-completion ()
+  "Stop showing the completion suggestion."
+  (overlay-put (cody--overlay) 'after-string "")
+  (cody--move-overlay 1 1)
+  (setq cody--last-index 0))
+
+(defun cody--maybe-clear-completion ()
+  "Implements `post-command-hook' to clear completion if applicable."
+  ;; For now, clear it if we're no longer at or before overlay start.
+  (unless (cody--point-at-overlay-p 'fuzzy)
+    (cody--hide-completion)))
 
 (defun cody--accept-completion ()
   "Record the completion as accepted."
-  ;; TODO:
-  ;;  - Hide and reset the overlay.
-  ;;  - Clear local variables.
-  ;;  - Update counters.
-  ;;  - Notify agent.
-  (message "cody--accept-completion: Not yet implemented"))
-
+  ;; For now, just dump the text into the buffer.
+  ;; We will remember the current point and indent all inserted text
+  (let ((text (cody--completion-text))
+        (start (line-beginning-position)))
+    (insert text)
+    (indent-region start (point)))
+  (cody--reset-overlay))
+  
 (defun cody--reject-completion ()
   "Record the completion as rejected."
   ;; TODO:
@@ -697,8 +838,58 @@ COMPLETION, a plist, is the first item in the completions vector."
 
 (defun cody--reset-overlay ()
   "Reset the completion overlay after use."
+  (when-let ((o cody--overlay))
+    (cody--hide-completion))
   (setq cody--overlay nil
         cody--completion nil))
+
+(defun cody--multiple-alternatives-p ()
+  "Return non-nil if the last completion response had multiple options."
+  (when-let* ((item-vec (cody--completion-alternatives)))
+    (> (length item-vec) 1)))
+
+(defun cody--key-for-command (command &optional keymap)
+  "Get user-visible key sequence for COMMAND."
+  (let ((keys (where-is-internal command keymap)))
+    (when keys
+      (key-description (car keys)))))
+
+(defun cody--key-msg-for-command (command)
+  "Return message about the key to press for a given COMMAND."
+  (if-let ((key (cody--key-for-command command)))
+      (format "%s to accept" key)
+    "No key is bound to accept"))
+
+(defun cody--cycle-completion (direction)
+  "Cycle through the completion alternatives in the specified DIRECTION.
+DIRECTION should be 1 for next, and -1 for previous."
+  (if (and cody-enable-completion-cycling
+           (cody--multiple-alternatives-p))
+      (if-let* ((items (cody--completion-alternatives))
+                (index (or cody--last-index 0))
+                (num (length items))
+                (next (% (+ index direction num) num)))
+          (progn
+            (cody--set-completion (aref items next))
+            (cody--display-completion next))
+        (when cody-enable-completion-cycling-help
+          (message "Error cycling through completions"))
+        (cody--log "Error cycling through completions: items= %s" items))
+    (when cody-enable-completion-cycling-help
+      (message "No other suggestions; %s"
+               (cody--key-msg-for-command 'cody--tab-key)))))
+
+(defun cody-next-completion ()
+  "Move to the next completion alternative."
+  (interactive)
+  (when cody-enable-completion-cycling
+      (cody--cycle-completion 1)))
+
+(defun cody-prev-completion ()
+  "Move to the previous completion alternative."
+  (interactive)
+  (when cody-enable-completion-cycling
+    (cody--cycle-completion -1)))
 
 (defun cody-dashboard ()
   "Show a console with data about Cody configuration and usage."
