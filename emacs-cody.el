@@ -222,7 +222,7 @@ Useful for recording metadata for the completion during its lifecycle."
            :notification-dispatcher #'cody--handle-agent-notification
            :process (make-process
                      :name "cody"
-                     :command cody-agent-command
+                     :command (cody--agent-command)
                      :coding 'utf-8-emacs-unix
                      :connection-type 'pipe
                      :stderr (get-buffer-create "*cody stderr*")
