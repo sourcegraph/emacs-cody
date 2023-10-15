@@ -16,6 +16,8 @@
 (require 'cl-lib)
 (require 'auth-source)
 (require 'jsonrpc)
+(require 'dash)
+(require 'uuidgen)
 (eval-when-compile (require 'subr-x))
 
 (defgroup cody nil
@@ -48,8 +50,20 @@ returned by the server is ever displayed or interactible."
 If non-nil, and multiple completion suggestions are returned from the
 server, it will show how many are available and how to cycle them.
 If nil, no messages are printed when cycling is available or used."
-  :group 'cody
-  :type 'boolean)
+  :type 'boolean
+  :group 'cody)
+
+(defcustom cody-enable-telemetry t
+  "Non-nil to allow anonymized event/usage telemetry.
+This information is used by Sourcegraph to improve the product."
+  :type 'boolean
+  :group 'cody)
+
+(defcustom cody--anonymized-uuid nil
+  "A generated ID for telemetry, to tie usage events together.
+This is generated and cached on first use, if telemetry is enabled."
+  :type 'string
+  :group 'cody)
 
 (defconst cody--cody-agent
   (file-name-concat (file-name-directory
@@ -83,6 +97,7 @@ You can call `cody-restart' to force it to re-check the version.")
 (defvar cody-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c c") 'cody-request-completion)
+    (define-key map (kbd "M-\\") 'cody-request-completion) ; for IntelliJ users
     (define-key map (kbd "TAB") 'cody--tab-key)
     (define-key map (kbd "C-g") 'cody--ctrl-g-key)
     (define-key map (kbd "ESC ESC ESC") 'cody--ctrl-g-key)
@@ -95,7 +110,7 @@ You can call `cody-restart' to force it to re-check the version.")
 (defvar cody-completion-map (make-sparse-keymap)
   "Keymap for cody overlay.")
 
-(defvar cody--use-threads nil
+(defvar cody--use-threads t
   "Non-nil to use threads; set to false for easier debugging.")
 
 (defvar cody--typewriter-effect nil
@@ -122,12 +137,15 @@ property should be considered immutable.")
 (defvar-local cody--completion-response nil
   "Most recent completion `jsonrpc' response from Cody.")
 
+(defvar-local cody--completion-timestamps nil
+  "Tracks event timestamps for telemetry, as plist properties.")
+
 ;; These are for keeping the agent notified about current file/selection.
 (defvar-local cody--last-point nil "The last point position.")
 (defvar-local cody--last-mark nil "The last mark position.")
 
 (defvar-local cody--last-index nil
-  "Index of Last displayed completion alternative.")
+  "Index of last displayed completion alternative.")
 
 (defface cody-completion-face
   '((t :inherit shadow :slant italic))
@@ -138,6 +156,10 @@ property should be considered immutable.")
   (let ((c (or completion cody--completion)))
     (or (plist-get c :displayText)   ; updated via user mutations
         (plist-get c :insertText)))) ; original from RPC
+
+(defsubst cody--timestamp ()
+  "Return seconds since epoch."
+  (float-time (current-time)))
 
 (defsubst cody--completion-alternatives ()
   "Return the list of alternatives from the last completion response.
@@ -205,10 +227,6 @@ Useful for recording metadata for the completion during its lifecycle."
                      :connection-type 'pipe
                      :stderr (get-buffer-create "*cody stderr*")
                      :noquery t)))
-    (cody--log "Initializing Cody agent")
-
-    ;; The 'initialize' request must be sent at the start of the connection
-    ;; before any other request/notification is sent.
     (cody--log "Sending 'initialize' request to agent")
     (jsonrpc-request cody--connection 'initialize
                      (list
@@ -216,9 +234,6 @@ Useful for recording metadata for the completion during its lifecycle."
                       :version "0.1"
                       :workspaceRootPath (cody--workspace-root)
                       :extensionConfiguration (cody--extension-configuration)))
-
-    ;; The 'initialized' notification must be sent after receiving the
-    ;; 'initialize' response.
     (jsonrpc-notify cody--connection 'initialized nil))
   cody--connection)
 
@@ -312,6 +327,7 @@ Changes to the buffer will be tracked by the Cody agent"
 
 (defun cody--minor-mode-shutdown ()
   "Code to run when `code-mode' is disabled in a buffer."
+  (cody--discard-completion)
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
   (setq cody-mode nil) ; this clears the modeline and other vars
@@ -382,8 +398,7 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
               (cody--send-file-to-agent (current-buffer)
                                         'textDocument/didChange)
               (setq happy t))
-          (if happy
-              (cody--log "Sent file %s on change" buffer-file-name)
+          (unless happy
             (cody--log "Unable to update Cody agent for %s" buffer-file-name)))))))
 
 (defun cody--post-command-function ()
@@ -717,41 +732,44 @@ and the start of the overlay."
 (defun cody--ctrl-g-key ()
   "Handler for quit; clears/rejects the completion suggestion."
   (interactive)
-  (cody--call-if-at-overlay 'cody--reject-completion "C-g" 'fuzzy))
+  (cody--call-if-at-overlay 'cody--discard-completion "C-g" 'fuzzy))
 
 (defun cody-request-completion ()
   "Request manual autocompletion in current buffer at point."
   (interactive)
   (unless cody-mode
     (error "Cody-mode not enabled in this buffer."))
-  (let* ((buf (current-buffer))
-         (file (buffer-file-name buf))
-         (line (1- (line-number-at-pos)))
-         (col (current-column))
-         (result (jsonrpc-request (cody--connection)
-                                  'autocomplete/execute
-                                  (list :filePath file
-                                        :position (list :line line :character col)
-                                        :triggerKind "Invoke"))))
-    (cody--handle-completion-result result)))
+  (condition-case err
+      (let* ((buf (current-buffer))
+             (file (buffer-file-name buf))
+             (line (1- (line-number-at-pos)))
+             (col (current-column)))
+        (cody--discard-completion) ; Clears telemetry from previous request.
+        (cody--update-completion-timestamp :triggeredAt)
+        (cody--handle-completion-result
+         (jsonrpc-request (cody--connection) 'autocomplete/execute
+                          (list :filePath file
+                                :position (list :line line :character col)
+                                :triggerKind "Invoke"))))
+    (error (cody--log "Error requesting completion: %s" err))))
 
 (defun cody--handle-completion-result (response)
   "Dispatches completion result based on jsonrpc RESPONSE."
   (if-let* ((item-vec (plist-get response :items))
             (_ (vectorp item-vec))
             (count (length item-vec)))
-      (cond
-       ((zerop count)
-        (message "No completions returned"))
-       (t
-        (cody--set-completion (aref item-vec 0) response)
-        (cody--display-completion 0)))
+      (if (zerop count)
+          (message "No completions returned")
+        (let (cody--completion-timestamps) ; preserve the trigger time
+          (cody--set-completion (aref item-vec 0) response))
+        (cody--update-completion-timestamp :displayedAt)
+        (cody--display-completion 0))
     (message "Unexpected response format: %s" response)))
 
 (defun cody--set-completion (completion &optional response)
   "Set a new COMPLETION, from any source, deleting any existing one(s).
 If RESPONSE is not passed in, it is retained, e.g. when cycling completions."
-  (cody--reset-overlay)
+  (cody--discard-completion)
   (setq cody--completion completion)
   (when response
     (setq cody--completion-response response)))
@@ -819,29 +837,38 @@ INDEX is the completion alternative to display from RESPONSE."
   (unless (cody--point-at-overlay-p 'fuzzy)
     (cody--hide-completion)))
 
+(defun cody--graphql-log-event (event)
+  "Send a `graphql/log-event' to the agent.
+EVENT is a Sourcegraph GraphQL event."
+  (condition-case err
+      (jsonrpc-notify (cody--connection) 'graphql/log-event
+                      (list :publicArgument event))
+    (error (cody--log "Error logging graphql event: %s" err))))
+
 (defun cody--accept-completion ()
   "Record the completion as accepted."
-  ;; For now, just dump the text into the buffer.
-  ;; We will remember the current point and indent all inserted text
   (let ((text (cody--completion-text))
         (start (line-beginning-position)))
     (insert text)
     (indent-region start (point)))
-  (cody--reset-overlay))
-  
-(defun cody--reject-completion ()
-  "Record the completion as rejected."
-  ;; TODO:
-  ;;  - Update counters
-  ;;  - Notify agent
-  (cody--reset-overlay))
+  (cody--telemetry-completion-accepted)
+  (jsonrpc-notify cody--connection 'autocomplete/clearLastCandidate nil)
+  (cody--discard-completion))
 
-(defun cody--reset-overlay ()
-  "Reset the completion overlay after use."
+(defun cody--discard-completion ()
+  "Discard/reset the current completion overlay and suggestion data.
+Sends telemetry notifications when telemetry is enabled."
+  (unless (eq (cody--completion-status) 'triggered)
+    (cody--telemetry-completion-suggested))
   (when-let ((o cody--overlay))
-    (cody--hide-completion))
+    (delete-overlay o))
   (setq cody--overlay nil
-        cody--completion nil))
+        cody--completion nil
+        cody--completion-response nil
+        cody--completion-timestamps nil
+        cody--last-point nil
+        cody--last-mark nil
+        cody--last-index nil))
 
 (defun cody--multiple-alternatives-p ()
   "Return non-nil if the last completion response had multiple options."
@@ -850,9 +877,8 @@ INDEX is the completion alternative to display from RESPONSE."
 
 (defun cody--key-for-command (command &optional keymap)
   "Get user-visible key sequence for COMMAND."
-  (let ((keys (where-is-internal command keymap)))
-    (when keys
-      (key-description (car keys)))))
+  (when-let ((keys (where-is-internal command keymap)))
+    (key-description (car keys))))
 
 (defun cody--key-msg-for-command (command)
   "Return message about the key to press for a given COMMAND."
@@ -883,7 +909,7 @@ DIRECTION should be 1 for next, and -1 for previous."
   "Move to the next completion alternative."
   (interactive)
   (when cody-enable-completion-cycling
-      (cody--cycle-completion 1)))
+    (cody--cycle-completion 1)))
 
 (defun cody-prev-completion ()
   "Move to the previous completion alternative."
@@ -904,6 +930,114 @@ DIRECTION should be 1 for next, and -1 for previous."
             (insert "Cody is connected")
           (insert "Cody is not connected"))))
     (pop-to-buffer buf)))
+
+(defun cody--add-completion-event-params (event-params &optional params)
+  "Add common completion event telemetry to the passed params.
+Both parameters are plists representing json objects."
+  (let ((updated (copy-sequence event-params))
+        (properties (list :id :languageId :source :charCount
+                          :lineCount :multilineMode :providerIdentifier)))
+    (when-let ((summary (plist-get params :contextSummary)))
+      (setq updated (plist-put updated :contextSummary summary)))
+    (dolist (prop properties)
+      (setq updated (plist-put updated prop (plist-get params prop))))
+    updated))
+
+(defun cody--update-completion-timestamp (property)
+  "Set the given timestamp named PROPERTY to the current time."
+  (setq cody--completion-timestamps
+        (plist-put cody--completion-timestamps property (cody--timestamp))))
+
+(defun cody--set-completion-response-prop (prop value)
+  "Update `cody--completion-response' setting PROP to VALUE."
+  (setq cody--completion-response
+        (plist-put cody--completion-response prop value)))
+
+(defun cody--set-completion-event-prop (prop value)
+  "Update the completion event in the response setting PROP to VALUE."
+  (cody--set-completion-response-prop
+   :completionEvent (plist-put (cody--completion-event) prop value)))
+
+(defun cody--completion-event-prop (prop)
+  "Retrieve PROP from the completion event, if present."
+  (plist-get (cody--completion-event) prop))
+
+(defun cody--completion-event ()
+  "Return the completion event passed along with the response.
+As part of the completion lifecycle, we fill in some of its fields,
+and we pass it back during telemetry logging."
+  (plist-get cody--completion-response :completionEvent))
+
+(defun cody--completion-timestamp (property)
+  "Return the given completion timestamp named PROPERTY."
+  (or (plist-get cody--completion-timestamps property) 0.0))
+
+(defun cody--completion-status ()
+  "Return `triggered', `displayed', `hidden', or nil."
+  (cond
+   ((null cody--completion-timestamps) nil)
+   ((zerop (or (cody--completion-timestamp :displayedAt) 0))
+    'triggered)
+   ((zerop (or (cody--completion-timestamp :hiddenAt) 0))
+    'displayed)
+   (t 'hidden)))
+
+(defun cody--anonymized-uuid ()
+  "Return, generating if needed, `cody--anonymized-uuid'."
+  (or cody--anonymized-uuid
+      (setq cody--anonymized-uuid (uuidgen-4))
+      (custom-save-all)
+      cody--anonymized-uuid))
+
+(defun cody--telemetry-completion-accepted ()
+  "Notify the telemetry collector that a completion was accepted."
+  (when cody-enable-telemetry
+    (cody--set-completion-event-prop :acceptedAt (cody--timestamp))
+    (condition-case err
+        (jsonrpc-notify
+         (cody--connection) 'graphql/log-event
+         (cody--create-graphql-event "CodyEmacsPlugin:completion:accepted"
+                                     (cody--add-completion-event-params
+                                      nil (cody--completion-event-prop :params))))
+      (error (cody--log "Telemetry error in completion:accepted: %s" err)))))
+
+(defun cody--telemetry-completion-suggested ()
+  (and cody-enable-telemetry cody--completion
+    (let ((latency (max (- (cody--completion-timestamp :displayedAt)
+                           (cody--completion-timestamp :triggeredAt)) 0))
+          (duration (max (- (cody--timestamp) ; :hiddenAt
+                            (cody--completion-timestamp :displayedAt)) 0))
+          (params (cody--completion-event-prop :params)))
+      (condition-case err
+          (jsonrpc-notify
+           (cody--connection) 'graphql/log-event
+           (cody--create-graphql-event
+            "CodyEmacsPlugin:completion:suggested"
+            (cody--add-completion-event-params
+             (list
+              :latency latency
+              :displayDuration duration
+              :isAnyKnownPluginEnabled (cody--other-plugins-enabled-p))
+             params)))
+        (error (cody--log "Telemetry error in completion:suggested: %s" err))))))
+
+(defun cody--other-plugins-enabled-p ()
+  "Return non-nil if another coding assistant is active concurrently."
+  (let ((features-to-check '(copilot tabnine)))
+    (cl-some (lambda (feature) (featurep feature)) features-to-check)))
+
+(defun cody--create-graphql-event (event-name params)
+  "Return a Sourcegraph GraphQL logging event for telemetry."
+  (let ((uuid (cody--anonymized-uuid)))
+    (list
+     :event event-name
+     :userCookieID uuid
+     :url cody-workspace-root
+     :source "IDEEXTENSION"
+     :argument nil
+     :publicArgument params
+     :client "EMACS_CODY_EXTENSION"
+     :deviceID uuid)))
 
 (provide 'emacs-cody)
 ;;; emacs-cody.el ends here
