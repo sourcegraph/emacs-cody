@@ -6,7 +6,7 @@
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; Maintainer: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; URL: https://github.com/keegancsmith/emacs-cody
-;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16"))
+;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (dash "2.13") (uuidgen "1.2"))
 
 
 ;;; Commentary:
