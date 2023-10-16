@@ -65,10 +65,17 @@ This is generated and cached on first use, if telemetry is enabled."
   :type 'string
   :group 'cody)
 
+(defcustom cody-enable-automatic-completions t
+  "Non-nil to have Cody prompt with suggestions automatically.
+Completion suggestions will appear after you stop typing for a while,
+if any suggestions are available. Set this to nil if you prefer to
+use manual completion triggering with `cody-request-completion'."
+  :type 'boolean
+  :group 'cody)
+
 (defconst cody--cody-agent
-  (file-name-concat (file-name-directory
-                     (or load-file-name
-                         (buffer-file-name)))
+  (file-name-concat (file-name-directory (or load-file-name
+                                             (buffer-file-name)))
                     "dist" "cody-agent.js")
   "Path to bundled cody agent.")
 
@@ -896,7 +903,8 @@ DIRECTION should be 1 for next, and -1 for previous."
                 (num (length items))
                 (next (% (+ index direction num) num)))
           (progn
-            (cody--set-completion (aref items next))
+            ;; Don't use `cody--set-completion' here; it discards everything.
+            (setq cody--completion (aref items next))
             (cody--display-completion next))
         (when cody-enable-completion-cycling-help
           (message "Error cycling through completions"))
