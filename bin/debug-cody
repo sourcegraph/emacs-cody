@@ -2,9 +2,12 @@
 
 # Find the Cody agent node process and send it a kill -USR1
 
-listing = `ps aux | grep dist/index.js | grep -v grep`
+listing = `ps aux | grep node | grep dist/cody-agent.js | grep -v grep`
 
-die "Couldn't find process pid" if listing.empty?
+if listing.empty?
+  puts "Couldn't find process pid"
+  exit 1
+end
 
 pid = listing.split[1]
 

@@ -1,9 +1,6 @@
-#+TITLE: emacs-cody: Sourcegraph Cody in Emacs
+#+TITLE: cody.el: Sourcegraph Cody in Emacs
 
-Do not use this, it is in development.
-
-This project currently lives at https://github.com/keegancsmith/emacs-cody. If
-it ever graduates to being useful it will migrate to the sourcegraph org.
+Do not use this yet; it is in development.
 
 * Status
 
@@ -41,7 +38,7 @@ In the future it should probably work more like ChatGPT or a shell.
   `M-x cody-force-unload` to tear everything down
 
 #+begin_src emacs-lisp
-  (load-file "emacs-cody.el")
+  (load-file "cody.el")
   
   (cody--request 'recipes/list)
   (cody--request 'recipes/execute
@@ -78,8 +75,9 @@ Restart Cody, e.g. with =*M-x cody-restart*=, and then verify that
 Cody is running the version of the agent in =*cody-agent-command*=.
 
 #+begin_src sh
-  $ ps aux | grep node
-  stevey           31174   0.0  0.3 420886240 171792   ??  Ss    4:08PM 0:00.88 /Users/stevey/.asdf/installs/nodejs/20.4.0/bin/node /Users/stevey/src/sg/cody/agent/dist/index.js 
+   $ ps aux | grep node
+   yourself 31174Ss 4:08PM ~/.asdf/installs/nodejs/20.4.0/bin/node \
+          ~/src/sg/cody/agent/dist/index.js 
 #+end_src
 
 To have it listen for the debugger to attach, you can either run
@@ -93,9 +91,11 @@ the node process yourself like so:
 Either way, your Agent should now be listening for a debugger.
 
 Now you can attach with =*chrome://inspect*= or with VSCode's debugger.
+VSCode is recommended, as it seems to connect more reliably - use the
+built-in configuration =*Debug: Attach to Node Process=*.
 
 You should also =*(setq jsonrpc-default-request-timeout 500)*= to ensure
 that the jsonrpc calls don't time out while you're paused at breakpoints.
 
-N.B. Cody in Emacs does not yet use threads, so if you hit a breakpoint,
-Emacs will lock up until you continue or detach the debugger.
+N.B. Everything stops when the debugger is stopped at a breakpoint,
+as Emacs concurrency is cooperative.

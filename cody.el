@@ -1,13 +1,12 @@
-;;; emacs-cody.el --- Sourcegraph Cody in Emacs -*- lexical-binding: t; -*-
+;;; cody.el --- Sourcegraph Cody in Emacs -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023 Sourcegraph, Inc.
 
 ;; Version: 0.1
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
-;; Maintainer: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
-;; URL: https://github.com/keegancsmith/emacs-cody
+;; Maintainer: Steve Yegge <steve.yegge@gmail.com>
+;; URL: https://github.com/sourcegraph/emacs-cody
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (dash "2.13") (uuidgen "1.2"))
-
 
 ;;; Commentary:
 ;; Load this package and then add `(cody-start)' to your .emacs
@@ -16,9 +15,9 @@
 (require 'cl-lib)
 (require 'auth-source)
 (require 'jsonrpc)
+(eval-when-compile (require 'subr-x))
 (require 'dash)
 (require 'uuidgen)
-(eval-when-compile (require 'subr-x))
 
 (defgroup cody nil
   "Sourcegraph Cody."
@@ -207,7 +206,7 @@ Useful for recording metadata for the completion during its lifecycle."
         ;; fails if the serverEndpoint doesn't know the codebase.
         :codebase "https://github.com/sourcegraph/cody"))
 
-(cl-defun cody--request (method &rest params &allow-other-keys)
+(defun cody--request (method &rest params)
   "Helper to send a Cody request."
   ;; TODO: Make requests cancellable and implement $/cancelRequest.
   (jsonrpc-request (cody--connection) method params))
@@ -493,29 +492,31 @@ visiting its associated file."
 
 (defun cody--handle-chat-update (params)
   "Handler for `chat/updateMessageInProgress'."
-  (message nil) ; clear the "Awaiting Cody response..." message
   (if cody--typewriter-effect
-      (if params
-          (cody-chat-insert-msg-tail params)
-        (cody-chat-insert "\n"))
+      (progn
+        (message nil)
+        (if params
+            (cody-chat-insert-msg-tail params)
+          (cody-chat-insert "\n")))
     (if params
         ;; Replace the accumulator with the updated generated output.
         (setq cody--message-in-progress params)
       ;; Null params --> Message is complete.
+      (message nil) ; clear 'Awaiting' message
       (cody-chat-insert
-       (plist-get cody--message-in-progress :displayText)
-       "\n\n")
+       (plist-get cody--message-in-progress :text) "\n\n")
       (setq cody--message-in-progress nil))))
 
 (defun cody-chat-insert (&rest args)
   "Insert ARGS at the end of the Cody chat buffer."
-  (with-current-buffer (cody-chat-buffer)
-    (goto-char (point-max))
-    (let ((inhibit-read-only t)
-          (inhibit-modification-hooks t))
-      (apply #'insert args)
-      (set-buffer-modified-p nil)
-      (cody-chat-scroll-to-bottom))))
+  (ignore-errors ; don't throw errors in process filter
+    (with-current-buffer (cody-chat-buffer)
+      (goto-char (point-max))
+      (let ((inhibit-read-only t)
+            (inhibit-modification-hooks t))
+        (when args (apply #'insert args))
+        (set-buffer-modified-p nil)
+        (cody-chat-scroll-to-bottom)))))
 
 (defun cody-chat-scroll-to-bottom ()
   "Move cursor to bottom of chat buffer."
@@ -535,7 +536,7 @@ visiting its associated file."
 This allows you to see the output stream in as it is generated.
 Cody chat buffer should be current, and PARAMS non-nil."
   (let* ((old-text cody--message-in-progress)
-         (new-text (plist-get params :displayText))
+         (new-text (plist-get params :text))
          (tail
           (cond
            ((null old-text) new-text)
@@ -643,7 +644,7 @@ there is a connection."
   (setq cody--node-version-status nil)
   (cody-start))
 
-(defun emacs-cody-unload-function ()
+(defun cody-unload-function ()
   "Handle `unload-feature' for this package."
   (cody-shutdown))
 
@@ -1047,5 +1048,5 @@ and we pass it back during telemetry logging."
      :client "EMACS_CODY_EXTENSION"
      :deviceID uuid)))
 
-(provide 'emacs-cody)
-;;; emacs-cody.el ends here
+(provide 'cody)
+;;; cody.el ends here
