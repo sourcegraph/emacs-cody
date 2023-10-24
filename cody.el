@@ -87,16 +87,9 @@ use manual completion triggering with `cody-request-completion'."
    (-displayText :initarg :displayText
                 :initform nil
                 :type (or null string)
+                :accessor cody--get-display-text
                 :documentation "The updated text as the user types."))
   "Represents a single alternative/suggestion in a completion response.")
-
-(cl-defmethod cody-get-display-text ((item cody-completion-item))
-  "Get the display text for the completion item ITEM."
-  (oref item -displayText))
-
-(cl-defmethod cody-set-display-text ((item cody-completion-item) value)
-  "Set the display text for the completion item ITEM to VALUE."
-  (oset item -displayText value))
 
 (defclass cody-completion ()
   ((items :initarg :items
@@ -137,7 +130,7 @@ Ensure that the index is within the bounds of the items vector."
 (cl-defmethod cody-update-display-text ((cc cody-completion) text)
   "Update TEXT for the currently selected completion item in CC."
   (when-let ((current-item (cody-get-current-item cc)))
-    (cody-set-display-text current-item text)))
+    (setf (cody--get-display-text current-item) text)))
 
 (cl-defmethod cody-get-current-item ((cc cody-completion))
   "Retrieve the currently selected completion alternative from CC."
