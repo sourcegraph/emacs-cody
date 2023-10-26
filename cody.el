@@ -185,7 +185,7 @@ You can call `cody-restart' to force it to re-check the version.")
 (defvar cody--access-token nil "LLM access token.")
 
 (defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
-(defconst cody-chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
+(defconst cody--chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
 
 (defvar cody-mode-map
   (let ((map (make-sparse-keymap)))
@@ -469,9 +469,8 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
 
 (defun cody--flush-pending-changes ()
   "If there is pending data, send it to the agent."
-  (let ((had-pending-changes-p (cody--cancel-debounce-timer)))
-    (when had-pending-changes-p
-      (cody--sync-buffer-to-agent 'textDocument/didChange))))
+  (when-let ((had-pending-changes-p (cody--cancel-debounce-timer)))
+    (cody--sync-buffer-to-agent 'textDocument/didChange)))
 
 (defun cody--sync-buffer-to-agent (operation)
   "Send the full file contents to the agent with OPERATION."
@@ -601,34 +600,34 @@ visiting its associated file."
       (progn
         (message nil)
         (if params
-            (cody-chat-insert-msg-tail params)
-          (cody-chat-insert "\n")))
+            (cody--chat-insert-msg-tail params)
+          (cody--chat-insert "\n")))
     (if params
         ;; Replace the accumulator with the updated generated output.
         (setq cody--message-in-progress params)
       ;; Null params --> Message is complete.
       (message nil) ; clear 'Awaiting' message
-      (cody-chat-insert
+      (cody--chat-insert
        (plist-get cody--message-in-progress :text) "\n\n")
       (setq cody--message-in-progress nil))))
 
-(defun cody-chat-insert (&rest args)
+(defun cody--chat-insert (&rest args)
   "Insert ARGS at the end of the Cody chat buffer."
   (ignore-errors ; don't throw errors in process filter
-    (with-current-buffer (cody-chat-buffer)
+    (with-current-buffer (cody--chat-buffer)
       (goto-char (point-max))
       (let ((inhibit-read-only t)
             (inhibit-modification-hooks t))
         (when args (apply #'insert args))
         (set-buffer-modified-p nil)
-        (cody-chat-scroll-to-bottom)))))
+        (cody--chat-scroll-to-bottom)))))
 
-(defun cody-chat-scroll-to-bottom ()
+(defun cody--chat-scroll-to-bottom ()
   "Move cursor to bottom of chat buffer."
   ;; If the buffer is visible in a window, then the point doesn't move
   ;; even after we insert text, as windows keep their own copy of point.
   ;; We want it to act more like a shell.
-  (with-current-buffer (cody-chat-buffer)
+  (with-current-buffer (cody--chat-buffer)
     (let ((win (get-buffer-window)))
       (if (window-live-p win)
           (set-window-point win (point-max))))))
@@ -636,7 +635,7 @@ visiting its associated file."
 ;; The agent sends an update with increasingly long hunks of the response,
 ;; e.g. "Here", "Here is", "Here is an", "Here is an explanation", ...
 ;; This permits a typewriter effect.
-(defun cody-chat-insert-msg-tail (params)
+(defun cody--chat-insert-msg-tail (params)
   "Insert only the most recent update to the message output.
 This allows you to see the output stream in as it is generated.
 Cody chat buffer should be current, and PARAMS non-nil."
@@ -681,7 +680,7 @@ Cody chat buffer should be current, and PARAMS non-nil."
   (interactive)
   (cody-shutdown)
   (ignore-errors
-    (kill-buffer (cody-chat-buffer)))
+    (kill-buffer (cody--chat-buffer)))
   (ignore-errors
     (kill-buffer cody-log-buffer-name)))
 
@@ -755,7 +754,6 @@ there is a connection."
 
 (defun cody--log (msg &rest args)
   "Log MSG with ARGS, currently just for debugging."
-  ;; TODO: Use a real logging package
   (with-current-buffer (get-buffer-create cody-log-buffer-name)
     (goto-char (point-max))
     (insert (apply #'format msg args) "\n")))
@@ -765,28 +763,28 @@ there is a connection."
 Query and output go into the *cody-chat* buffer."
   (interactive)
   (cody-start)
-  (display-buffer (cody-chat-buffer))
+  (display-buffer (cody--chat-buffer))
   (let ((query (read-from-minibuffer "Ask Cody: ")))
-    (cody-chat-insert-query query)
+    (cody--chat-insert-query query)
     (cody--request 'recipes/execute
                    :id "chat-question"
                    :humanChatInput query))
   (message "Awaiting response from Cody..."))
 
-(defun cody-chat-insert-query (query)
+(defun cody--chat-insert-query (query)
   "Insert the user QUERY into the chat output buffer."
-  (with-current-buffer (cody-chat-buffer)
+  (with-current-buffer (cody--chat-buffer)
     (goto-char (point-max))
-    (cody-chat-insert "> " query "\n\n")
+    (cody--chat-insert "> " query "\n\n")
     (goto-char (point-max))))
 
-(defun cody-chat-buffer ()
+(defun cody--chat-buffer ()
   "Return Cody chat output buffer, initializing if necessary."
-  (let* ((probe (get-buffer cody-chat-buffer-name)))
+  (let* ((probe (get-buffer cody--chat-buffer-name)))
     (if (buffer-live-p probe)
         probe
       ;; Create and initialize the chat buffer.
-      (with-current-buffer (get-buffer-create cody-chat-buffer-name)
+      (with-current-buffer (get-buffer-create cody--chat-buffer-name)
         (buffer-disable-undo)
         (let ((inhibit-modification-hooks t))
           (insert-image (cody-logo) "Cody")
@@ -857,35 +855,43 @@ and the start of the overlay."
   (interactive)
   (unless cody-mode
     (error "Cody-mode not enabled in this buffer."))
-  (condition-case err
-      (let* ((buf (current-buffer))
-             (file (buffer-file-name buf))
-             (line (1- (line-number-at-pos)))
-             (col (current-column)))
-        (cody--discard-completion) ; Clears telemetry from previous request.
-        (cody--flush-pending-changes)
-        (cody--update-completion-timestamp :triggeredAt)
-        (cody--handle-completion-result
-         (jsonrpc-request (cody--connection) 'autocomplete/execute
-                          (list :filePath file
-                                :position (list :line line :character col)
-                                :triggerKind "Invoke"))))
-    (error (cody--log "Error requesting completion: %s" err))))
+  (let* ((buf (current-buffer))
+         (file (buffer-file-name buf))
+         (line (1- (line-number-at-pos)))
+         (col (current-column))
+         (spot (point))
+         (trigger-kind (if (called-interactively-p 'interactive)
+                           "Invoke" "Automatic")))
+    (cody--discard-completion) ; Clears telemetry from previous request.
+    (cody--flush-pending-changes)
+    (cody--update-completion-timestamp :triggeredAt)
+    (jsonrpc-async-request
+     (cody--connection) 'autocomplete/execute
+     (list :filePath file
+           :position (list :line line :character col)
+           :triggerKind trigger-kind)
+     :deferred 'cody  ; have new requests replace pending ones
+     :success-fn (lambda (response)
+                   (cody--handle-completion-result response buf spot))
+     :error-fn (lambda (err) (cody--log "Error requesting completion: %s" err))
+     :timeout-fn (lambda () (cody--log "Error: request-completion timed out")))))
 
-(defun cody--handle-completion-result (response)
+(defun cody--handle-completion-result (response buf request-spot)
   "Dispatches completion result based on jsonrpc RESPONSE."
-  (let ((items (plist-get response :items)))
-    (cond
-     ((not (vectorp items))
-      (message "Unexpected response format: %s" response))
-     ((zerop (length items))
-      (message "No completions returned"))
-     (t
-      (let (cody--completion-timestamps) ; preserve the trigger time from request
-        (ignore-errors (cody--discard-completion))
-        (setq cody--completion (cody--populate-from-response response)))
-      (cody--update-completion-timestamp :displayedAt)
-      (cody--display-completion 0)))))
+  (with-current-buffer buf
+    (when (eq (point) request-spot) ; if the point moved, discard it
+      (let ((items (plist-get response :items)))
+        (cond
+         ((not (vectorp items))
+          (message "Unexpected response format: %s" response))
+         ((zerop (length items))
+          (message "No completions returned"))
+         (t
+          (let (cody--completion-timestamps) ; preserve the trigger time from request
+            (ignore-errors (cody--discard-completion))
+            (setq cody--completion (cody--populate-from-response response)))
+          (cody--update-completion-timestamp :displayedAt)
+          (cody--display-completion 0)))))))
 
 (defun cody--populate-from-response (response)
   "Parse RESPONSE and return a populated `cody-completion' object."
@@ -912,8 +918,11 @@ INDEX is the completion alternative to display from RESPONSE."
       (error (cody--log "Error setting completion text: %s" err)))
     (when (and cody-enable-completion-cycling-help
                (cody--multiple-items-p cc))
-      (message "Showing suggestion %s of %s (M-n/M-p to cycle)"
-               (1+ index) (cody--num-items cc)))))
+      (message "Showing suggestion %s of %s (%s/%s to cycle)"
+               (1+ index)
+               (cody--num-items cc)
+               (cody--key-for-command #'cody-next-completion)
+               (cody--key-for-command #'cody-prev-completion)))))
 
 (defun cody--overlay-set-text (text)
   "Update overlay TEXT and redisplay it at point."
