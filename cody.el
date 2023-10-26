@@ -399,7 +399,7 @@ Changes to the buffer will be tracked by the Cody agent"
   "Code to run when `cody-mode' is enabled in a buffer."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil t))
-  (cody--batch-update-agent 'textDocument/didOpen)
+  (cody--sync-buffer-to-agent 'textDocument/didOpen)
   (message "Cody mode enabled"))
 
 (defun cody--minor-mode-shutdown ()
@@ -442,7 +442,7 @@ in the user's Emacs session when they start or restart Cody."
   "Maybe enable `cody-mode' on a newly opened file.
 Current buffer is visiting the file."
   (when (cody--enable-for-buffer-p)
-    (cody--batch-update-agent 'textDocument/didOpen)
+    (cody--sync-buffer-to-agent 'textDocument/didOpen)
     (cody-mode)))
 
 (defun cody--enable-for-buffer-p ()
@@ -458,19 +458,24 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
   (unless cody--update-debounce-timer
     (setq cody--update-debounce-timer
           (run-with-idle-timer cody--debounce-timer-delay nil
-                               #'cody--batch-update-agent
-                               'textDocument/didChange))))
+                               #'cody--flush-pending-changes))))
 
-(defun cody--batch-update-agent (operation)
-  "Debounce timer has expired; send modified regions to Agent."
+(defun cody--cancel-debounce-timer ()
+  "Cancel debounce timer, returning non-nil if a timer was cancelled."
   (when cody--update-debounce-timer
     (cancel-timer cody--update-debounce-timer)
-    (setq cody--update-debounce-timer nil))
-  (cody--send-file-to-agent (current-buffer) operation))
+    (setq cody--update-debounce-timer nil)
+    'cancelled))
 
 (defun cody--flush-pending-changes ()
   "If there is pending data, send it to the agent."
-  (cody--batch-update-agent 'textDocument/didChange))
+  (let ((had-pending-changes-p (cody--cancel-debounce-timer)))
+    (when had-pending-changes-p
+      (cody--sync-buffer-to-agent 'textDocument/didChange))))
+
+(defun cody--sync-buffer-to-agent (operation)
+  "Send the full file contents to the agent with OPERATION."
+  (cody--send-file-to-agent (current-buffer) operation))
 
 (defun cody--send-file-to-agent (buf op)
   "Make the jsonrpc call to notify agent of opened/changed file."
