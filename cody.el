@@ -381,6 +381,8 @@ You can override it with `cody-workspace-root'."
                          (file-name-directory cody--cody-agent)))
    file-base))
 
+(defvar cody-mode-menu)
+
 (defun cody-mode-line-click (event)
   "Handle mouse click EVENT on Cody mode line item."
   (interactive "e")
@@ -1012,6 +1014,11 @@ KIND specifies whether this was requested manually or automatically"
    :response response
    :completionEvent (plist-get response :completionEvent)))
 
+(defsubst cody--key-for-command (command &optional keymap)
+  "Get user-visible key sequence for COMMAND."
+  (when-let ((keys (where-is-internal command keymap)))
+    (key-description (car keys))))
+
 (defun cody--display-completion (index)
   "Show the server's code autocompletion suggestion.
 RESPONSE is the entire jsonrpc response.
@@ -1116,11 +1123,6 @@ Sends telemetry notifications when telemetry is enabled."
         cody--last-point nil
         cody--last-mark nil
         cody--update-debounce-timer nil))
-
-(defsubst cody--key-for-command (command &optional keymap)
-  "Get user-visible key sequence for COMMAND."
-  (when-let ((keys (where-is-internal command keymap)))
-    (key-description (car keys))))
 
 (defun cody--key-msg-for-command (command)
   "Return message about the key to press for a given COMMAND."
