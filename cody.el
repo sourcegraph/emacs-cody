@@ -6,7 +6,7 @@
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; Maintainer: Steve Yegge <steve.yegge@gmail.com>
 ;; URL: https://github.com/sourcegraph/emacs-cody
-;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (dash "2.13") (uuidgen "1.2"))
+;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "1.2"))
 
 ;;; Commentary:
 ;; Load this package and then add `(cody-start)' to your .emacs
@@ -17,7 +17,6 @@
 (require 'auth-source)
 (require 'jsonrpc)
 (eval-when-compile (require 'subr-x))
-(require 'dash)
 (require 'uuidgen)
 
 (defgroup cody nil
@@ -107,9 +106,9 @@ use manual completion triggering with `cody-request-completion'."
              :accessor cody--completion-response
              :documentation "Top-level jsonrpc protocol response object.")
    (-current-item-index :initform 0
-                  :type integer
-                  :accessor cody--current-item-index
-                  :documentation "Index of currently selected completion alternative."))
+                        :type integer
+                        :accessor cody--current-item-index
+                        :documentation "Index of currently selected completion alternative."))
   "Represents the entire JSON-RPC response for a requested completion.")
 
 (cl-defmethod cody--num-items ((cc cody-completion))
@@ -134,19 +133,19 @@ use manual completion triggering with `cody-request-completion'."
   "Return the original text for the currently displayed item from CC.
 Returns nil if it cannot find it for any reason."
   (when-let ((item (cody--current-item cc)))
-    (cody--trim-leading (oref item insertText))))
-  
+    (oref item insertText)))
+
 (cl-defmethod cody--completion-display-text ((cc cody-completion))
   "Return the up-to-date text for the currently displayed item from CC.
 Returns nil if it cannot find it for any reason."
   (when-let ((item (cody--current-item cc)))
-    (cody--trim-leading (oref item -displayText))))
-  
+    (oref item -displayText)))
+
 (cl-defmethod cody--completion-text ((cc cody-completion))
   "Retrieve the text of the selected CC item."
   (when-let ((item (cody--current-item cc)))
-      (or (cody--display-text item)
-          (oref item insertText))))
+    (or (cody--display-text item)
+        (oref item insertText))))
 
 (cl-defmethod cody-set-completion-event-prop ((cc cody-completion) prop value)
   "Update the completion event in CC, setting PROP to VALUE."
@@ -225,6 +224,11 @@ with the Cody Agent.")
 This is an instance of a `cody-completion' object, which see.
 Each time we request a new completion, it gets discarded and replaced.")
 
+(defvar cody--completion-timer nil
+  "Maybe trigger a completion each time Emacs goes idle.")
+
+(defvar cody--last-completion-trigger-spot nil "Temp variable.")
+
 (defsubst cody--cc ()
   "Return the current buffer-local version of `cody--completion'."
   cody--completion)
@@ -249,10 +253,6 @@ Each time we request a new completion, it gets discarded and replaced.")
 (defsubst cody--timestamp ()
   "Return seconds since epoch."
   (float-time (current-time)))
-
-(defsubst cody--trim-leading (s)
-  "Trim leading whitespace from S."
-  (replace-regexp-in-string "^\\s-+" "" s))
 
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;   machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
@@ -359,13 +359,19 @@ You can override it with `cody-workspace-root'."
       (and buffer-file-name (file-name-directory buffer-file-name))
       (getenv "HOME")))
 
+;;; Code for cody minor mode:
+
 (defun cody-logo ()
-  "Return the Cody logo image via `create-image'."
-  (create-image (cody-logo-file "cody-logo.png")))
+  "Return the Cody large logo image, memoizing on first call."
+  (or (get 'cody-logo 'cached-image)
+      (put 'cody-logo 'cached-image
+           (create-image (cody-logo-file "cody-logo.png")))))
 
 (defun cody-logo-small ()
-  "Return the Cody modeline image."
-  (create-image (cody-logo-file "cody-logo-small.png")))
+  "Return the Cody modeline image, memoizing on first call."
+  (or (get 'cody-logo-small 'cached-image)
+      (put 'cody-logo-small 'cached-image
+           (create-image (cody-logo-file "cody-logo-small.png")))))
 
 (defun cody-logo-file (file-base)
   "Construct path to bundled cody image file."
@@ -375,13 +381,37 @@ You can override it with `cody-workspace-root'."
                          (file-name-directory cody--cody-agent)))
    file-base))
 
+(defvar cody-mode-menu)
+
+(defun cody-mode-line-click (event)
+  "Handle mouse click EVENT on Cody mode line item."
+  (interactive "e")
+  (popup-menu cody-mode-menu))
+
+(defvar cody-mode-line-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1] 'cody-mode-line-click)
+    (easy-menu-define cody-mode-menu map "Cody Mode Menu"
+      '("Cody"
+        ["Say Hello" (message "Hello from Cody!")]
+        ["Turn Off" cody-mode]
+        ["Help" (describe-function 'cody-mode)]))
+    map)
+  "Keymap for Cody mode line button.")
+
+(defun cody-propertize-icon (text-or-image)
+  "Return propertized string or image for `cody--minor-mode-icon`."
+  (propertize (if (stringp text-or-image) text-or-image " ")
+              'display (if (stringp text-or-image) nil text-or-image)
+              'help-echo "Cody mode - click for menu"
+              'mouse-face 'mode-line-highlight
+              'keymap cody-mode-line-map))
+
 (defvar cody--minor-mode-icon
-  (let ((img (cody-logo-small)))
-    (if img
-        (progn
-          (plist-put (cdr img) :ascent 80)  ; Raise the image up a bit.
-          (list " " (propertize " " 'display img)))
-      " Cody"))
+  (if-let ((img (and (display-graphic-p) (cody-logo-small))))
+      ;; Hack - bump the image up a bit vertically using :ascent, to center it.
+      (cody-propertize-icon (cons 'image (plist-put (cdr img) :ascent 80)))
+    (cody-propertize-icon " Cody"))
   "Mode line lighter for Cody minor-mode.")
 
 (put 'cody--minor-mode-icon 'risky-local-variable t)
@@ -389,17 +419,28 @@ You can override it with `cody-workspace-root'."
 (define-minor-mode cody-mode
   "Minor mode for interacting with the Cody coding assistant.
 Changes to the buffer will be tracked by the Cody agent"
-  :lighter cody--minor-mode-icon
+  ;; Never did figure out how to get this option to display a custom menu.
+  ;; Currently going with a hack that puts it up at a higher level in the
+  ;; mode line, but does produce a custom menu when mouse-1 clicked.
+  ;; Bounty to anyone who can figure out how to do it correctly.
+  ;;
+  ;;:lighter cody--minor-mode-icon
   :keymap cody-mode-map
   (if cody-mode
       (cody--minor-mode-startup)
     (cody--minor-mode-shutdown)))
+
+(defvar-local cody--mode-line-icon-evaluator
+    '(:eval (when cody-mode cody--minor-mode-icon))
+  "Descriptor for producing a custom menu in the mode line lighter.")
 
 (defun cody--minor-mode-startup ()
   "Code to run when `cody-mode' is enabled in a buffer."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil t))
   (cody--sync-buffer-to-agent 'textDocument/didOpen)
+  (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
+  (force-mode-line-update t)
   (message "Cody mode enabled"))
 
 (defun cody--minor-mode-shutdown ()
@@ -408,6 +449,9 @@ Changes to the buffer will be tracked by the Cody agent"
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
   (setq cody-mode nil) ; this clears the modeline and other vars
+  ;; (setq mode-line-modes (delete cody--mode-line-icon-evaluator mode-line-modes))
+  ;; (force-mode-line-update t)
+  (cody--cancel-completion-timer)
   (message "Cody mode disabled"))
 
 (defun cody--text-file-p (buf)
@@ -451,6 +495,8 @@ Currently it means the buffer is visiting a text file on disk."
   (and (cody--alive-p)
        ;; TODO: Some way to customize how cody-mode is chosen for a buffer.
        (cody--text-file-p (current-buffer))))
+
+;;; Code for change notifications and syncing with Agent.
 
 (defun cody--after-change (&rest _)
   "Implement the `textDocument/didChange' notification.
@@ -506,10 +552,16 @@ Installed on `post-command-hook', which see."
   "Set your breakpoint for `cody--post-command-function` here instead."
   (ignore-errors
     (cody--maybe-clear-completion))
-  (let ((original-text (cody--completion-original-text (cody--cc)))
-        (prefix (buffer-substring-no-properties
-                  (save-excursion (back-to-indentation) (point))
-                  (point))))
+  (cody--handle-typing-in-completion)
+  (cody--notify-if-focus-changed))
+
+(defun cody--handle-typing-in-completion ()
+  "If the user is typing within the completion, keep it in sync."
+  (when-let* ((cc (cody--cc))
+              (original-text (cody--completion-original-text cc))
+              (prefix (buffer-substring-no-properties
+                       (save-excursion (back-to-indentation) (point))
+                       (point))))
     ;; If text up to point is still a prefix of the original completion,
     ;; always update the completion to finish what they've typed so far.
     (when (and (cody--point-at-overlay-p)
@@ -517,11 +569,10 @@ Installed on `post-command-hook', which see."
                (string-prefix-p prefix original-text 'ignorecase)
                (not (string= prefix original-text)))
       (cody--overlay-set-text
-       (substring original-text (length prefix)))))
-  (cody--notify-if-focus-changed))
+       (substring original-text (length prefix))))))
 
 (defun cody--notify-if-focus-changed ()
-  "Notify agent of a focus or selection change."
+  "Check whether the Agent should be notified of a focus/selection change."
   (let ((point-unequal (neq cody--last-point (point)))
         ;; If the mark isn't set (nil), we pretend it is set at point,
         ;; yielding a zero-width range for the current selection.
@@ -531,18 +582,36 @@ Installed on `post-command-hook', which see."
     (if mark-unequal
         (setq cody--last-mark (or (mark) (point))))
     (if (or point-unequal mark-unequal)
-        (cody--handle-focus-change))))
+        (cody--handle-focus-change point-unequal))))
 
-(defun cody--handle-focus-change ()
-  "Notify agent that cursor or selection has changed in current buffer."
-  ;; Does not send the file contents. Olaf assured me you can leave it undefined
-  ;; when you're just updating the selection or caret.
-  (when cody-mode ; sanity check
+(defun cody--handle-focus-change (cursor-moved-p)
+  "Notify agent that cursor or selection has changed in current buffer.
+If CURSOR-MOVED-P then we may also trigger a completion timer."
+  ;; Does not send the file contents. You can leave it undefined when
+  ;; you're just updating the selection or caret.
+  (when cody-mode
     (jsonrpc-notify (cody--connection) 'textDocument/didFocus
                     (list
                      :filePath (buffer-file-name (current-buffer))
                      ;; Specifically leave :content undefined here.
-                     :selection (cody--selection (current-buffer))))))
+                     :selection (cody--selection (current-buffer))))
+    ;; Maybe set a timer to trigger an automatic completion.
+    ;; Do some trivial rejects here before setting the timer.
+    (when (and cursor-moved-p
+               (cody--buffer-is-active-p)
+               (not (cody--overlay-visible-p)))
+      (cody--start-completion-timer))))
+
+(defun cody--start-completion-timer ()
+  "Sets a cancellable timer to check for an automatic completion."
+  (setq cody--completion-timer
+        (run-with-idle-timer 0 nil #'cody--maybe-trigger-completion)))
+
+(defun cody--cancel-completion-timer ()
+  "Cancel any pending timer to check for automatic completions."
+  (when cody--completion-timer
+    (cancel-timer cody--completion-timer)
+    (setq cody--completion-timer nil)))
 
 (defun cody--selection (buf)
   "Return the jsonrpc parameters representing the selection in BUF.
@@ -586,13 +655,12 @@ The return value is appropiate for sending directly to the rpc layer."
   "Check if the current buffer is the last one visiting its file.
 It returns non-nil if the buffer being killed is the last one
 visiting its associated file."
-  (let ((current-file (buffer-file-name))
-        (current-buf (current-buffer)))
-    (when current-file
-      (not (cl-some (lambda (buf)
-                      (and (not (eq buf current-buf))
-                           (string-equal current-file (buffer-file-name buf))))
-                    (buffer-list))))))
+  (when-let ((current-file (buffer-file-name))
+             (current-buf (current-buffer)))
+    (not (cl-some (lambda (buf)
+                    (and (not (eq buf current-buf))
+                         (string-equal current-file (buffer-file-name buf))))
+                  (buffer-list)))))
 
 (defun cody--handle-chat-update (params)
   "Handler for `chat/updateMessageInProgress'."
@@ -850,6 +918,34 @@ and the start of the overlay."
   (interactive)
   (cody--call-if-at-overlay 'cody--discard-completion "C-g" 'fuzzy))
 
+(defun cody--maybe-trigger-completion ()
+  "Under the right conditions, trigger an automatic completion request."
+  (when (and cody-mode
+             cody-enable-automatic-completions
+             (not (cody--overlay-visible-p))
+             (not mark-active)
+             (cody--completion-syntactically-eligible-p))
+    (cody-request-completion)))
+
+(defun cody--keyboard-event-p (event)
+  "Return t if EVENT is a keyboard event."
+  (and (symbolp event)
+       (not (mouse-event-p event))))
+
+(defun cody--mouse-click-event-p (event)
+  "Return non-nil if EVENT is a mouse click event."
+  (and (mouse-event-p event)
+       (memq (event-basic-type event) '(mouse-1 mouse-2 mouse-3))))
+
+(defun cody--completion-syntactically-eligible-p ()
+  "Return non-nil if this is a valid location for a completion trigger.
+Does syntactic smoke screens before requesting completion from Agent."
+  (not (or
+        ;; user is in the middle of a word (jetbrains client regex)
+        (looking-back "\\s*[A-Za-z]+" (line-beginning-position))
+        ;; suffix of the current line contains any word characters
+        (looking-at ".*\\w.*"))))
+
 (defun cody-request-completion ()
   "Request manual autocompletion in current buffer at point."
   (interactive)
@@ -862,30 +958,42 @@ and the start of the overlay."
          (spot (point))
          (trigger-kind (if (called-interactively-p 'interactive)
                            "Invoke" "Automatic")))
-    (cody--discard-completion) ; Clears telemetry from previous request.
-    (cody--flush-pending-changes)
-    (cody--update-completion-timestamp :triggeredAt)
-    (jsonrpc-async-request
-     (cody--connection) 'autocomplete/execute
-     (list :filePath file
-           :position (list :line line :character col)
-           :triggerKind trigger-kind)
-     :deferred 'cody  ; have new requests replace pending ones
-     :success-fn (lambda (response)
-                   (cody--handle-completion-result response buf spot))
-     :error-fn (lambda (err) (cody--log "Error requesting completion: %s" err))
-     :timeout-fn (lambda () (cody--log "Error: request-completion timed out")))))
+    (when (and (not buffer-read-only)
+               (or (string= trigger-kind "Invoke")
+                   ;; Avoid spamming if the cursor hasn't moved.
+                   (not (eql spot cody--last-completion-trigger-spot))))
+      (cody--discard-completion) ; Clears telemetry from previous request.
+      (cody--flush-pending-changes)
+      (cody--update-completion-timestamp :triggeredAt)
+      (setq cody--last-completion-trigger-spot spot)
+      (jsonrpc-async-request
+       (cody--connection) 'autocomplete/execute
+       (list :filePath file
+             :position (list :line line :character col)
+             :triggerKind trigger-kind)
+       :deferred 'cody  ; have new requests replace pending ones
+       :success-fn (lambda (response)
+                     (cody--handle-completion-result response buf spot trigger-kind))
+       :error-fn (lambda (err) (cody--log "Error requesting completion: %s" err))
+       :timeout-fn (lambda () (cody--log "Error: request-completion timed out"))))))
 
-(defun cody--handle-completion-result (response buf request-spot)
-  "Dispatches completion result based on jsonrpc RESPONSE."
-  (with-current-buffer buf
-    (when (eq (point) request-spot) ; if the point moved, discard it
-      (let ((items (plist-get response :items)))
+(defun cody--handle-completion-result (response buf request-spot kind)
+  "Dispatches completion result based on jsonrpc RESPONSE.
+BUF and REQUEST-SPOT specify where the request was initiated.
+KIND specifies whether this was requested manually or automatically"
+  (when (cody--buffer-is-active-p buf)
+    (with-current-buffer buf
+      (let ((items (plist-get response :items))
+            (manual (equal kind "Invoke")))
         (cond
+         ((not (eql (point) request-spot)) nil) ; Drop event if point has moved.
          ((not (vectorp items))
-          (message "Unexpected response format: %s" response))
+          (let ((msg (format "Unexpected response format: %s" response)))
+            (cody--log msg)
+            (when manual (message msg))))
          ((zerop (length items))
-          (message "No completions returned"))
+          (when manual
+            (message "No completions returned")))
          (t
           (let (cody--completion-timestamps) ; preserve the trigger time from request
             (ignore-errors (cody--discard-completion))
@@ -906,6 +1014,11 @@ and the start of the overlay."
    :response response
    :completionEvent (plist-get response :completionEvent)))
 
+(defsubst cody--key-for-command (command &optional keymap)
+  "Get user-visible key sequence for COMMAND."
+  (when-let ((keys (where-is-internal command keymap)))
+    (key-description (car keys))))
+
 (defun cody--display-completion (index)
   "Show the server's code autocompletion suggestion.
 RESPONSE is the entire jsonrpc response.
@@ -914,7 +1027,7 @@ INDEX is the completion alternative to display from RESPONSE."
               (text (cody--completion-text cc)))
     (setf (cody--current-item-index cc) index)
     (condition-case err
-        (cody--overlay-set-text (cody--trim-leading text))
+        (cody--overlay-set-text text)
       (error (cody--log "Error setting completion text: %s" err)))
     (when (and cody-enable-completion-cycling-help
                (cody--multiple-items-p cc))
@@ -997,6 +1110,7 @@ EVENT is a Sourcegraph GraphQL event."
 (defun cody--discard-completion ()
   "Discard/reset the current completion overlay and suggestion data.
 Sends telemetry notifications when telemetry is enabled."
+  (cody--cancel-completion-timer)
   (unless (eq (cody--completion-status) 'triggered)
     (cody--telemetry-completion-suggested))
   (when-let ((o cody--overlay))
@@ -1004,14 +1118,11 @@ Sends telemetry notifications when telemetry is enabled."
   (setq cody--overlay nil
         cody--completion nil
         cody--completion-timestamps nil
+        ;; Just to be clear, don't change this or the completion will resurrect.
+        cody--last-completion-trigger-spot cody--last-completion-trigger-spot
         cody--last-point nil
         cody--last-mark nil
         cody--update-debounce-timer nil))
-
-(defun cody--key-for-command (command &optional keymap)
-  "Get user-visible key sequence for COMMAND."
-  (when-let ((keys (where-is-internal command keymap)))
-    (key-description (car keys))))
 
 (defun cody--key-msg-for-command (command)
   "Return message about the key to press for a given COMMAND."
@@ -1024,19 +1135,20 @@ Sends telemetry notifications when telemetry is enabled."
 Returns nil if we meet all the preconditions. If not, then it
 handles logging and messaging."
   (let ((verbose (or cody-enable-completion-cycling-help
-                     (memq this-command
-                           '(cody-next-completion cody-prev-completion))))
+                     (and (called-interactively-p 'interactive)
+                          (memq this-command
+                                '(cody-next-completion cody-prev-completion)))))
         (cc (cody--cc)))
     (cl-labels ((explain (msg &rest args)
                   (let ((output (apply #'message msg args)))
-                    (when verbose (message output))
-                    (cody--log output)
-                    'fail)))
+                    (if verbose (message output)
+                      (cody--log output))
+                    'fail))) ; return non-nil to signal failed check
       (cond
        ((not cody-enable-completion-cycling)
-        (explain "Enable `cody-enable-completion-cycling' to enable cycling."))
+        (explain "Set `cody-enable-completion-cycling' to enable cycling."))
        ((not (and (cody--cc) (cody--current-item (cody--cc))))
-        (explain "No completion"))
+        (explain "No completion here"))
        ((not (cody--multiple-items-p cc))
         (explain "No other suggestions; %s"
                  (cody--key-msg-for-command 'cody--tab-key)))
@@ -1044,7 +1156,7 @@ handles logging and messaging."
        ((not (string= (cody--completion-display-text cc)
                       (cody--completion-original-text cc)))
         (explain "Cycling currently unavailable."))
-      (t nil))))) ; cycling is available
+       (t nil))))) ; cycling is available
 
 (defun cody--cycle-completion (direction)
   "Cycle through the completion items in the specified DIRECTION.
@@ -1081,7 +1193,7 @@ DIRECTION should be 1 for next, and -1 for previous."
 (defun cody-dashboard ()
   "Show a console with data about Cody configuration and usage."
   (interactive)
-  ;; TODO: Lots more information here.
+  ;; TODO: Agent should collect stats and provide them for us.
   (let ((buf (get-buffer-create "*cody-dashboard*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t)
@@ -1204,6 +1316,14 @@ to see the current completion response object in detail.
                                (eieio-oref obj (eieio-slot-descriptor-name slot))))
                        (eieio-class-slots (eieio-object-class obj))))))
     (pop-to-buffer buf)))
+
+;;; Utilities
+
+(defun cody--buffer-is-active-p (&optional buf)
+  "Return non-nil if BUF is active. BUF defaults to the current buffer."
+  (let ((buffer (or buf (current-buffer))))
+    (and (eq buffer (window-buffer (selected-window)))
+         (get-buffer-window buffer t))))
 
 (provide 'cody)
 ;;; cody.el ends here
