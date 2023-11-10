@@ -601,7 +601,7 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
     ;; Maybe set a timer to trigger an automatic completion.
     ;; Do some trivial rejects here before setting the timer.
     (when (and cursor-moved-p
-               (cody--buffer-is-active-p)
+               (cody--buffer-active-p)
                (not (cody--overlay-visible-p)))
       (cody--start-completion-timer))))
 
@@ -984,7 +984,7 @@ Does syntactic smoke screens before requesting completion from Agent."
   "Dispatches completion result based on jsonrpc RESPONSE.
 BUF and REQUEST-SPOT specify where the request was initiated.
 KIND specifies whether this was requested manually or automatically"
-  (when (cody--buffer-is-active-p buf)
+  (when (cody--buffer-active-p buf)
     (with-current-buffer buf
       (let ((items (plist-get response :items))
             (manual (equal kind "Invoke")))
@@ -1021,6 +1021,24 @@ KIND specifies whether this was requested manually or automatically"
   (when-let ((keys (where-is-internal command keymap)))
     (key-description (car keys))))
 
+(defun cody--position-to-point (pos)
+  "Convert Cody Agent line/char position to a buffer position."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (plist-get pos :line))
+    (forward-char (plist-get pos :character))
+    (point)))
+
+(defsubst cody--range-start (range)
+  "Fetches START from RANGE, a `cody--completion-item-range' object.
+Converts from line/char to buffer positions."
+  (cody--position-to-point (plist-get range :start)))
+
+(defsubst cody--range-end (range)
+  "Fetches END from RANGE, a `cody--completion-item-range' object.
+Converts from line/char to buffer positions."
+  (cody--position-to-point (plist-get range :end)))
+
 (defun cody--display-completion (index)
   "Show the server's code autocompletion suggestion.
 RESPONSE is the entire jsonrpc response.
@@ -1030,8 +1048,8 @@ INDEX is the completion alternative to display from RESPONSE."
     (setf (cody--current-item-index cc) index)
     (when-let* ((item (cody--current-item cc))
                 (range (cody--completion-item-range item))
-                (start-pos (cody--position-to-point (plist-get range :start)))
-                (end-pos (cody--position-to-point (plist-get range :end))))
+                (start-pos (cody--range-start range))
+                (end-pos (cody--range-end range)))
       ;; TODO: Line prefix and suffix handling.
       (condition-case err
           (cody--overlay-set-text text)
@@ -1108,8 +1126,8 @@ EVENT is a Sourcegraph GraphQL event."
          (item (cody--current-item cc))
          (text (cody--completion-item-original-text item))
          (range (cody--completion-item-range item))
-         (start-pos (cody--position-to-point (plist-get range :start)))
-         (end-pos (cody--position-to-point (plist-get range :end))))
+         (start-pos (cody--range-start range))
+         (end-pos (cody--range-end range)))
     (when (and start-pos end-pos text)
       (undo-boundary)
       (delete-region start-pos end-pos)
@@ -1119,13 +1137,6 @@ EVENT is a Sourcegraph GraphQL event."
     (cody--telemetry-completion-accepted)
     (jsonrpc-notify cody--connection 'autocomplete/clearLastCandidate nil)
     (cody--discard-completion)))
-
-(defun cody--position-to-point (pos)
-  (save-excursion
-    (goto-char (point-min))
-    (forward-line (plist-get pos :line))
-    (forward-char (plist-get pos :character))
-    (point)))
 
 (defun cody--discard-completion ()
   "Discard/reset the current completion overlay and suggestion data.
@@ -1318,6 +1329,8 @@ Both parameters are plists representing json objects."
      :client "EMACS_CODY_EXTENSION"
      :deviceID uuid)))
 
+;;; Utilities
+
 (defun cody--edebug-inspect (obj)
   "Pretty-print OBJ, one of our EIEIO objects while debugging.
 It pops the pretty-printed object tree into a separate buffer.
@@ -1337,9 +1350,7 @@ to see the current completion response object in detail.
                        (eieio-class-slots (eieio-object-class obj))))))
     (pop-to-buffer buf)))
 
-;;; Utilities
-
-(defun cody--buffer-is-active-p (&optional buf)
+(defun cody--buffer-active-p (&optional buf)
   "Return non-nil if BUF is active. BUF defaults to the current buffer."
   (let ((buffer (or buf (current-buffer))))
     (and (eq buffer (window-buffer (selected-window)))
