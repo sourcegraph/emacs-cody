@@ -12,7 +12,7 @@
 ;; Load this package and then add `(cody-start)' to your .emacs
 
 ;;; Code:
-(eval-when-compile (require 'cl-lib))
+;; (eval-when-compile (require 'cl-lib))
 (eval-when-compile (require 'eieio-base))
 (require 'auth-source)
 (require 'jsonrpc)
@@ -311,7 +311,7 @@ Each time we request a new completion, it gets discarded and replaced.")
     (cody--log "Sending 'initialize' request to agent")
     (jsonrpc-request cody--connection 'initialize
                      (list
-                      :name "emacs"
+                      :name "Emacs"
                       :version "0.1"
                       :workspaceRootPath (cody--workspace-root)
                       :extensionConfiguration (cody--extension-configuration)))
@@ -410,11 +410,15 @@ You can override it with `cody-workspace-root'."
               'mouse-face 'mode-line-highlight
               'keymap cody-mode-line-map))
 
-(defvar cody--minor-mode-icon
-  (if-let ((img (and (display-graphic-p) (cody-logo-small))))
+(defun cody--decorate-mode-line-lighter (image)
+  "Uses the passed IMAGE for the mode line lighter."
+  (if-let ((img (and (display-graphic-p) image)))
       ;; Hack - bump the image up a bit vertically using :ascent, to center it.
       (cody-propertize-icon (cons 'image (plist-put (cdr img) :ascent 80)))
-    (cody-propertize-icon " Cody"))
+    (cody-propertize-icon " Cody")))
+
+(defvar cody--minor-mode-icon
+  (cody--decorate-mode-line-lighter (cody-logo-small))
   "Mode line lighter for Cody minor-mode.")
 
 (put 'cody--minor-mode-icon 'risky-local-variable t)
@@ -452,7 +456,6 @@ Changes to the buffer will be tracked by the Cody agent"
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
   (setq cody-mode nil) ; this clears the modeline and other vars
-  ;; (setq mode-line-modes (delete cody--mode-line-icon-evaluator mode-line-modes))
   ;; (force-mode-line-update t)
   (cody--cancel-completion-timer)
   (message "Cody mode disabled"))
@@ -995,8 +998,9 @@ KIND specifies whether this was requested manually or automatically"
             (cody--log msg)
             (when manual (message msg))))
          ((zerop (length items))
-          (when manual
-            (message "No completions returned")))
+          (if (not manual)
+              (message "No completions returned")
+            (cody--flash-no-completions)))
          (t
           (let (cody--completion-timestamps) ; preserve the trigger time from request
             (ignore-errors (cody--discard-completion))
