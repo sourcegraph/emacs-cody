@@ -179,7 +179,7 @@ You can call `cody-restart' to force it to re-check the version.")
 
 (defun cody--agent-command ()
   "Command and arguments for running agent."
-  (list (or cody-node-path-override "node") cody--cody-agent ""))
+  (list (or cody-node-path-override "node") cody--cody-agent))
 
 (defvar cody--connection nil "Global jsonrpc connection to Agent.")
 (defvar cody--message-in-progress nil "Chat message accumulator.")
