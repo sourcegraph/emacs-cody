@@ -308,12 +308,12 @@ Each time we request a new completion, it gets discarded and replaced.")
                      :connection-type 'pipe
                      :stderr (get-buffer-create "*cody stderr*")
                      :noquery t)))
-    (cody--log "Sending 'initialize' request to agent")
+    ;;(cody--log "Sending 'initialize' request to agent")
     (jsonrpc-request cody--connection 'initialize
                      (list
                       :name "Emacs"
                       :version "0.1"
-                      :workspaceRootPath (cody--workspace-root)
+                      :workspaceRootUri (cody--workspace-root)
                       :extensionConfiguration (cody--extension-configuration)))
     (jsonrpc-notify cody--connection 'initialized nil))
   cody--connection)
