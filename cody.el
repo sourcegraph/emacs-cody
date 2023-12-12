@@ -12,7 +12,7 @@
 ;; Load this package and then add `(cody-start)' to your .emacs
 
 ;;; Code:
-;; (eval-when-compile (require 'cl-lib))
+(eval-when-compile (require 'cl-lib))
 (eval-when-compile (require 'eieio-base))
 (require 'auth-source)
 (require 'jsonrpc)
@@ -998,9 +998,8 @@ KIND specifies whether this was requested manually or automatically"
             (cody--log msg)
             (when manual (message msg))))
          ((zerop (length items))
-          (if (not manual)
-              (message "No completions returned")
-            (cody--flash-no-completions)))
+          (when manual
+            (message "No completions returned")))
          (t
           (let (cody--completion-timestamps) ; preserve the trigger time from request
             (ignore-errors (cody--discard-completion))
