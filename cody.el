@@ -190,12 +190,14 @@ You can call `cody-restart' to force it to re-check the version.")
 
 (defvar cody-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c c") 'cody-request-completion) ; prolly a bad default?
+    (define-prefix-command 'cody-prefix-map)
+    (define-key map (kbd "C-c /") cody-prefix-map)
+    (define-key cody-prefix-map (kbd "c") 'cody-request-completion)
+    (define-key cody-prefix-map (kbd "x") 'cody-mode) ; toggle cody-mode off for buffer
     (define-key map (kbd "M-\\") 'cody-request-completion) ; for IntelliJ users
-    (define-key map (kbd "TAB") 'cody--tab-key)
+    (define-key map (kbd "TAB") 'cody--tab-key) ; accept completions
     (define-key map (kbd "C-g") 'cody--ctrl-g-key)
     (define-key map (kbd "ESC ESC ESC") 'cody--ctrl-g-key)
-    (define-key map (kbd "C-c x") 'cody-mode) ; toggle cody-mode off in this buffer
     (when cody-enable-completion-cycling
       (define-key map (kbd "M-n") 'cody-next-completion)
       (define-key map (kbd "M-p") 'cody-prev-completion))
