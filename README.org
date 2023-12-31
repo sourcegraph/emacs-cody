@@ -23,6 +23,13 @@ token directly:
 
 To try it out, evaluate the buffer.
 
+Note: For now, if you are using the extension and want ripgrep support,
+you will want to add this to your `~/.bashrc` or equivalent:
+
+#+begin_src shell-script
+  export MOCK_RG_PATH="/opt/homebrew/bin/rg" # path to your rg binary
+#+end_src
+
 * Available commands
 
   `M-x cody` will start Cody and prompt you with available commands

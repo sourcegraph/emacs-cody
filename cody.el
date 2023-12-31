@@ -13,7 +13,7 @@
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
-(eval-when-compile (require 'eieio-base))
+(eval-and-compile (require 'eieio-base))
 (require 'auth-source)
 (require 'jsonrpc)
 (eval-when-compile (require 'subr-x))
@@ -183,17 +183,23 @@ You can call `cody-restart' to force it to re-check the version.")
 
 (defvar cody--connection nil "Global jsonrpc connection to Agent.")
 (defvar cody--message-in-progress nil "Chat message accumulator.")
-(defvar cody--access-token nil "LLM access token.")
+
+(defvar cody--sourcegraph-host "sourcegraph.com" "Sourcegraph host.")
+(defvar cody--access-token nil "LLM access token for `cody--sourcegraph-host'.")
 
 (defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
 (defconst cody--chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
 
+(defvar cody-prefix-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "c") 'cody-request-completion)
+    (define-key map (kbd "x") 'cody-mode) ; toggle cody-mode off for buffer
+    map)
+  "Prefix map for `cody-mode'.")
+
 (defvar cody-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-prefix-command 'cody-prefix-map)
-    (define-key map (kbd "C-c /") cody-prefix-map)
-    (define-key cody-prefix-map (kbd "c") 'cody-request-completion)
-    (define-key cody-prefix-map (kbd "x") 'cody-mode) ; toggle cody-mode off for buffer
+    (define-key map (kbd "C-c /") 'cody-prefix-map)
     (define-key map (kbd "M-\\") 'cody-request-completion) ; for IntelliJ users
     (define-key map (kbd "TAB") 'cody--tab-key) ; accept completions
     (define-key map (kbd "C-g") 'cody--ctrl-g-key)
@@ -260,7 +266,7 @@ Each time we request a new completion, it gets discarded and replaced.")
   (float-time (current-time)))
 
 ;; Add to your ~/.authinfo.gpg something that looks like
-;;   machine sourcegraph.sourcegraph.com login apikey password sgp_SECRET
+;;   machine `cody--sourcegraph-host' login apikey password sgp_SECRET
 (defun cody--access-token ()
   "Fetch and cache the access token from ~/.authinfo.gpg."
   (or cody--access-token
@@ -272,13 +278,13 @@ Each time we request a new completion, it gets discarded and replaced.")
                           (if (string-prefix-p "sgp_" token) token)))
                       (auth-source-search
                        :max 10
-                       :host "sourcegraph.sourcegraph.com"
+                       :host cody--sourcegraph-host
                        :require '(:secret :host))))))
 
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
   (list :accessToken (cody--access-token)
-        :serverEndpoint "https://sourcegraph.sourcegraph.com"
+        :serverEndpoint (concat "https://" cody--sourcegraph-host)
         ;; Note there is a bug currently where the agent initialize request
         ;; fails if the serverEndpoint doesn't know the codebase.
         :codebase "https://github.com/sourcegraph/cody"))
@@ -310,7 +316,6 @@ Each time we request a new completion, it gets discarded and replaced.")
                      :connection-type 'pipe
                      :stderr (get-buffer-create "*cody stderr*")
                      :noquery t)))
-    ;;(cody--log "Sending 'initialize' request to agent")
     (jsonrpc-request cody--connection 'initialize
                      (list
                       :name "Emacs"
@@ -581,10 +586,10 @@ Installed on `post-command-hook', which see."
 
 (defun cody--notify-if-focus-changed ()
   "Check whether the Agent should be notified of a focus/selection change."
-  (let ((point-unequal (neq cody--last-point (point)))
+  (let ((point-unequal (not (eq cody--last-point (point))))
         ;; If the mark isn't set (nil), we pretend it is set at point,
         ;; yielding a zero-width range for the current selection.
-        (mark-unequal (neq cody--last-mark (or (mark) (point)))))
+        (mark-unequal (not (eq cody--last-mark (or (mark) (point))))))
     (if point-unequal
         (setq cody--last-point (point)))
     (if mark-unequal
@@ -875,7 +880,7 @@ Query and output go into the *cody-chat* buffer."
        ;; Make sure we have set a nonzero-length string as the visible string.
        ;; Otherwise the overlay may be hidden. We could also check that it's at bob,
        ;; but that would lead to false positives in completing in an empty buffer.
-       (plusp (length (overlay-get cody--overlay 'after-string)))))
+       (cl-plusp (length (overlay-get cody--overlay 'after-string)))))
 
 (defun cody--overlay ()
   "Get Cody completion overlay, creating if needed."
@@ -949,7 +954,7 @@ and the start of the overlay."
   "Return non-nil if this is a valid location for a completion trigger.
 Does syntactic smoke screens before requesting completion from Agent."
   (not (or
-        ;; user is in the middle of a word (jetbrains client regex)
+        ;; user is in the middle of a word (from jetbrains cody client)
         (looking-back "\\s*[A-Za-z]+" (line-beginning-position))
         ;; suffix of the current line contains any word characters
         (looking-at ".*\\w.*"))))
@@ -1091,7 +1096,7 @@ INDEX is the completion alternative to display from RESPONSE."
       (let ((text (cody--completion-text (cody--cc)))
             (c (char-after beg))) ; char they just typed
         (cond
-         ((!= c (aref text 0)) ; typed something different
+         ((/= c (aref text 0)) ; typed something different
           (unless (eq (char-syntax c) ?\s)
             (cody--hide-completion))) ; hide if not whitespace
          ((= 1 (length text))
@@ -1119,10 +1124,11 @@ INDEX is the completion alternative to display from RESPONSE."
     (cody--hide-completion)))
 
 (defun cody--graphql-log-event (event)
-  "Send a `graphql/log-event' to the agent.
+  "Send a `telemetry/recordEvent' to the agent.
 EVENT is a Sourcegraph GraphQL event."
+  ;; TODO: Need to switch this to the new 'telemetry/recordEvent'
   (condition-case err
-      (jsonrpc-notify (cody--connection) 'graphql/log-event
+      (jsonrpc-notify (cody--connection) 'telemetry/recordEvent
                       (list :publicArgument event))
     (error (cody--log "Error logging graphql event: %s" err))))
 
@@ -1242,7 +1248,7 @@ DIRECTION should be 1 for next, and -1 for previous."
 
 ;;;==== Telemetry ==============================================================
 
-;; TODO: Agent has a new API coming in early Nov 2023; greatly simplifies all this.
+;; TODO: Agent has a new API that theoretically greatly simplifies all this.
 
 (defun cody--update-completion-timestamp (property)
   "Set the given timestamp named PROPERTY to the current time."
@@ -1277,7 +1283,7 @@ DIRECTION should be 1 for next, and -1 for previous."
       (cody-set-completion-event-prop cc :acceptedAt (cody--timestamp))
       (condition-case err
           (jsonrpc-notify
-           (cody--connection) 'graphql/log-event
+           (cody--connection) 'telemetry/recordEvent
            (cody--create-graphql-event "CodyEmacsPlugin:completion:accepted"
                                        (cody--add-completion-event-params
                                         nil (cody-completion-event-prop cc :params))))
@@ -1293,7 +1299,7 @@ DIRECTION should be 1 for next, and -1 for previous."
                 (params (cody-completion-event-prop cc :params)))
       (condition-case err
           (jsonrpc-notify
-           (cody--connection) 'graphql/log-event
+           (cody--connection) 'telemetry/recordEvent
            (cody--create-graphql-event
             "CodyEmacsPlugin:completion:suggested"
             (cody--add-completion-event-params
