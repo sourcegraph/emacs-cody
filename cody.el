@@ -190,16 +190,13 @@ You can call `cody-restart' to force it to re-check the version.")
 (defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
 (defconst cody--chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
 
-(defvar cody-prefix-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "c") 'cody-request-completion)
-    (define-key map (kbd "x") 'cody-mode) ; toggle cody-mode off for buffer
-    map)
-  "Prefix map for `cody-mode'.")
+(define-prefix-command 'cody-prefix-map)
+(define-key cody-prefix-map (kbd "c") 'cody-request-completion)
+(define-key cody-prefix-map (kbd "x") 'cody-mode) ; toggle cody-mode off for buffer
 
 (defvar cody-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c /") 'cody-prefix-map)
+    (define-key map (kbd "C-c /") cody-prefix-map)
     (define-key map (kbd "M-\\") 'cody-request-completion) ; for IntelliJ users
     (define-key map (kbd "TAB") 'cody--tab-key) ; accept completions
     (define-key map (kbd "C-g") 'cody--ctrl-g-key)
@@ -968,17 +965,17 @@ Does syntactic smoke screens before requesting completion from Agent."
          (file (buffer-file-name buf))
          (line (1- (line-number-at-pos)))
          (col (current-column))
-         (spot (point))
+         (cursor (point))
          (trigger-kind (if (called-interactively-p 'interactive)
                            "Invoke" "Automatic")))
     (when (and (not buffer-read-only)
                (or (string= trigger-kind "Invoke")
                    ;; Avoid spamming if the cursor hasn't moved.
-                   (not (eql spot cody--last-completion-trigger-spot))))
+                   (not (eql cursor cody--last-completion-trigger-spot))))
       (cody--discard-completion) ; Clears telemetry from previous request.
       (cody--flush-pending-changes)
       (cody--update-completion-timestamp :triggeredAt)
-      (setq cody--last-completion-trigger-spot spot)
+      (setq cody--last-completion-trigger-spot cursor)
       (jsonrpc-async-request
        (cody--connection) 'autocomplete/execute
        (list :filePath file
@@ -986,7 +983,7 @@ Does syntactic smoke screens before requesting completion from Agent."
              :triggerKind trigger-kind)
        :deferred 'cody  ; have new requests replace pending ones
        :success-fn (lambda (response)
-                     (cody--handle-completion-result response buf spot trigger-kind))
+                     (cody--handle-completion-result response buf cursor trigger-kind))
        :error-fn (lambda (err) (cody--log "Error requesting completion: %s" err))
        :timeout-fn (lambda () (cody--log "Error: request-completion timed out"))))))
 
@@ -1054,7 +1051,8 @@ Converts from line/char to buffer positions."
 RESPONSE is the entire jsonrpc response.
 INDEX is the completion alternative to display from RESPONSE."
   (when-let* ((cc (cody--cc))
-              (text (cody--completion-text cc)))
+              (text (cody--completion-text cc))
+              (_ (string-match-p "[[:graph:]]" text))) ; has non-whitespace
     (setf (cody--current-item-index cc) index)
     (when-let* ((item (cody--current-item cc))
                 (range (cody--completion-item-range item))
