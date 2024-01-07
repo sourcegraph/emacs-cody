@@ -16,8 +16,8 @@
 (eval-and-compile (require 'eieio-base))
 (require 'auth-source)
 (require 'jsonrpc)
-(eval-when-compile (require 'subr-x))
 (require 'uuidgen)
+(require 'cody-diff)
 
 (defgroup cody nil
   "Sourcegraph Cody."
@@ -126,11 +126,6 @@ use manual completion triggering with `cody-request-completion'."
   (ignore-errors
     (aref (cody--completion-items cc) (cody--current-item-index cc))))
 
-(cl-defmethod cody--update-display-text ((cc cody-completion) text)
-  "Update TEXT for the currently selected completion item in CC."
-  (when-let ((item (cody--current-item cc)))
-    (setf (cody--display-text item) text)))
-
 (cl-defmethod cody--completion-original-text ((cc cody-completion))
   "Return the original text for the currently displayed item from CC.
 Returns nil if it cannot find it for any reason."
@@ -190,6 +185,7 @@ You can call `cody-restart' to force it to re-check the version.")
 (defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
 (defconst cody--chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
 
+(defvar cody-prefix-map nil "Map for bindings with Cody's prefix.")
 (define-prefix-command 'cody-prefix-map)
 (define-key cody-prefix-map (kbd "c") 'cody-request-completion)
 (define-key cody-prefix-map (kbd "x") 'cody-mode) ; toggle cody-mode off for buffer
@@ -208,7 +204,7 @@ You can call `cody-restart' to force it to re-check the version.")
   "Keymap for `cody-mode'.")
 
 (defvar cody-completion-map (make-sparse-keymap)
-  "Keymap for cody overlay.")
+  "Keymap for cody completion overlay.")
 
 (defvar cody--use-threads t
   "Non-nil to use threads; set to false for easier debugging.")
@@ -224,8 +220,8 @@ You can call `cody-restart' to force it to re-check the version.")
 These hooks enable it to keep buffers and selections synced
 with the Cody Agent.")
 
-(defvar-local cody--overlay nil
-  "Overlay for Cody current completion suggestion.")
+(defvar-local cody--overlay-deltas nil
+  "List of overlays for Cody current completion suggestion.")
 
 (defvar-local cody--completion nil
   "Most recent completion response object from the Cody Agent.
@@ -255,7 +251,7 @@ Each time we request a new completion, it gets discarded and replaced.")
   "Wait at least this long between notifications of buffer content changes.")
 
 (defface cody-completion-face
-  '((t :inherit shadow :slant italic))
+  '((t :inherit shadow :slant italic :foreground "#4c8da3"))
   "Face for Cody completion overlay.")
 
 (defsubst cody--timestamp ()
@@ -332,8 +328,9 @@ Each time we request a new completion, it gets discarded and replaced.")
 Version is configurable with `cody--node-min-version'."
   (cl-case cody--node-version-status
     (good t)
-    (bad (error "Installed Node.js must be at least %s - see `cody-node-path-override'"
-                cody--node-min-version))
+    (bad (error
+          "Installed Node.js must be at least %s - see `cody-node-path-override'"
+          cody--node-min-version))
     (otherwise
      (let* ((cmd (concat (or cody-node-path-override "node") " -v"))
             (node-version (string-trim (shell-command-to-string cmd)))
@@ -341,7 +338,8 @@ Version is configurable with `cody--node-min-version'."
        (if (not (string-match "^v\\([0-9]+\\)\\.\\([0-9]+\\)\\.\\([0-9]+\\)"
                               node-version))
            (progn
-             (message "Error: Could not parse node.js version string: %s" node-version)
+             (message "Error: Could not parse node.js version string: %s"
+                      node-version)
              nil)
          (setq major (string-to-number (match-string 1 node-version))
                minor (string-to-number (match-string 2 node-version))
@@ -352,7 +350,9 @@ Version is configurable with `cody--node-min-version'."
                 (min-patch (string-to-number (nth 2 min-version-parts))))
            (if (or (> major min-major)
                    (and (= major min-major) (> minor min-minor))
-                   (and (= major min-major) (= minor min-minor) (>= patch min-patch)))
+                   (and (= major min-major)
+                        (= minor min-minor)
+                        (>= patch min-patch)))
                (setq cody--node-version-status 'good)
              (setq cody--node-version-status 'bad)
              (error
@@ -460,7 +460,6 @@ Changes to the buffer will be tracked by the Cody agent"
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
   (setq cody-mode nil) ; this clears the modeline and other vars
-  ;; (force-mode-line-update t)
   (cody--cancel-completion-timer)
   (message "Cody mode disabled"))
 
@@ -480,17 +479,16 @@ in the user's Emacs session when they start or restart Cody."
   ;; Selectively turn on `cody-mode' for newly opened files.
   (add-hook 'find-file-hook #'cody--maybe-turn-on-cody-mode)
   ;; Selectively turn on `cody-mode' for applicable open buffers.
-  (let ((file-count 0)
-        (cody-count 0))
-    (cl-loop
-     for buf being the buffers
-     do
-     (with-current-buffer buf
-       (cody--maybe-turn-on-cody-mode)
-       (if cody-mode (cl-incf cody-count)))
-     (cl-incf file-count)
-     finally (cody--log "Scanned %s buffers, enabled Cody in %s"
-                        file-count cody-count))))
+  (cl-loop with file-count = 0
+           and cody-count = 0
+           for buf being the buffers
+           do
+           (with-current-buffer buf
+             (cody--maybe-turn-on-cody-mode)
+             (if cody-mode (cl-incf cody-count)))
+           (cl-incf file-count)
+           finally (cody--log "Scanned %s buffers, enabled Cody in %s"
+                              file-count cody-count)))
 
 (defun cody--maybe-turn-on-cody-mode ()
   "Maybe enable `cody-mode' on a newly opened file.
@@ -567,19 +565,8 @@ Installed on `post-command-hook', which see."
 
 (defun cody--handle-typing-in-completion ()
   "If the user is typing within the completion, keep it in sync."
-  (when-let* ((cc (cody--cc))
-              (original-text (cody--completion-original-text cc))
-              (prefix (buffer-substring-no-properties
-                       (save-excursion (back-to-indentation) (point))
-                       (point))))
-    ;; If text up to point is still a prefix of the original completion,
-    ;; always update the completion to finish what they've typed so far.
-    (when (and (cody--point-at-overlay-p)
-               (stringp original-text)
-               (string-prefix-p prefix original-text 'ignorecase)
-               (not (string= prefix original-text)))
-      (cody--overlay-set-text
-       (substring original-text (length prefix))))))
+  (when-let ((o (cody--point-at-overlay-p)))
+    (cody--shorten-completion o)))
 
 (defun cody--notify-if-focus-changed ()
   "Check whether the Agent should be notified of a focus/selection change."
@@ -872,36 +859,51 @@ Query and output go into the *cody-chat* buffer."
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (and (cody--cc)
-       (overlayp cody--overlay)
-       ;; Make sure we have set a nonzero-length string as the visible string.
-       ;; Otherwise the overlay may be hidden. We could also check that it's at bob,
-       ;; but that would lead to false positives in completing in an empty buffer.
-       (cl-plusp (length (overlay-get cody--overlay 'after-string)))))
+  (when-let ((o (car-safe cody--overlay-deltas)))
+    (and (overlayp o)
+         (overlay-buffer o) ; overlay is positioned somewhere
+         (cody--cc))))
 
-(defun cody--overlay ()
-  "Get Cody completion overlay, creating if needed."
-  (unless (overlayp cody--overlay)
-    (let ((o (setq cody--overlay (make-overlay 1 1 nil nil t))))
+(defun cody--make-overlay (text pos)
+  "Create a new overlay for displaying part of a completion suggestion.
+Gives it TEXT as the `after-string' and sets it at POS.
+Pushes the new overlay onto the front of `cody--overlay-deltas'."
+  (save-excursion
+    (let ((o (make-overlay pos pos nil nil t)))
+      (overlay-put o 'cody t)
       (overlay-put o 'keymap cody-completion-map)
       (overlay-put o 'priority '(nil . 50))
       (overlay-put o 'help-echo "TAB to accept")
-      (overlay-put o 'insert-in-front-hooks '(cody--overlay-insert-front))))
-  cody--overlay)
+      (overlay-put o 'insert-in-front-hooks '(cody--overlay-insert-front))
+      (cody--overlay-set-text o text)
+      (push o cody--overlay-deltas)
+      o)))
+
+(defun cody--overlay-set-text (overlay text)
+  "Update TEXT for OVERLAY."
+  (let ((suggestion (propertize text 'face 'cody-completion-face)))
+    (put-text-property 0 1 'cursor t suggestion)
+    (overlay-put overlay 'after-string suggestion)))
+
+(defsubst cody--overlay-get-text (overlay)
+  "Return the text of the specified OVERLAY."
+  (overlay-get overlay 'after-string))
 
 (defun cody--point-at-overlay-p (&optional fuzzy)
-  "Return non-nil if point is at the start of a completion suggestion.
-If FUZZY is non-nil, returns non-nil if there is only whitespace between
-point and the start of the completion."
-  (and cody-mode
-       (cody--overlay-visible-p)
-       (let ((beg (overlay-start cody--overlay)))
-         (if fuzzy
-             (save-excursion
-               (save-match-data
-                 (string-match-p "\\`[[:space:]\r]*\\'"
-                                 (buffer-substring (point) beg))))
-           (= beg (point)))))) ; strict
+  "Return the cody completion fragment overlay at point, if any.
+If FUZZY is non-nil, returns the overlay if there is only whitespace
+between point and the start of the completion. Returns nil if point
+is not currently at the start of a completion suggestion delta."
+  (when (and cody-mode (cody--overlay-visible-p))
+    (cl-loop for o in cody--overlay-deltas
+             when (or (and fuzzy
+                           (>= (overlay-start o) (point))
+                           (string-match-p "\\`[[:space:]]*\\'"
+                                           (buffer-substring-no-properties
+                                            (point) (overlay-start o))))
+                      (and (not fuzzy) ; strict
+                           (= (overlay-start o) (point))))
+             return o)))
 
 (defmacro cody--call-if-at-overlay (func key &optional fuzzy)
   "If point is at the start of the completion overlay, invoke FUNC.
@@ -983,7 +985,8 @@ Does syntactic smoke screens before requesting completion from Agent."
              :triggerKind trigger-kind)
        :deferred 'cody  ; have new requests replace pending ones
        :success-fn (lambda (response)
-                     (cody--handle-completion-result response buf cursor trigger-kind))
+                     (cody--handle-completion-result
+                      response buf cursor trigger-kind))
        :error-fn (lambda (err) (cody--log "Error requesting completion: %s" err))
        :timeout-fn (lambda () (cody--log "Error: request-completion timed out"))))))
 
@@ -1009,7 +1012,10 @@ KIND specifies whether this was requested manually or automatically"
             (ignore-errors (cody--discard-completion))
             (setq cody--completion (cody--populate-from-response response)))
           (cody--update-completion-timestamp :displayedAt)
-          (cody--display-completion 0)))))))
+          (condition-case err
+              (cody--display-completion 0)
+            (error
+             (cody--log "Error displaying completion: %s" err)))))))))
 
 (defun cody--populate-from-response (response)
   "Parse RESPONSE and return a populated `cody-completion' object."
@@ -1050,70 +1056,107 @@ Converts from line/char to buffer positions."
   "Show the server's code autocompletion suggestion.
 RESPONSE is the entire jsonrpc response.
 INDEX is the completion alternative to display from RESPONSE."
-  (when-let* ((cc (cody--cc))
-              (text (cody--completion-text cc))
-              (_ (string-match-p "[[:graph:]]" text))) ; has non-whitespace
-    (setf (cody--current-item-index cc) index)
-    (when-let* ((item (cody--current-item cc))
-                (range (cody--completion-item-range item))
-                (start-pos (cody--range-start range))
-                (end-pos (cody--range-end range)))
-      ;; TODO: Line prefix and suffix handling.
-      (condition-case err
-          (cody--overlay-set-text text)
-        (error (cody--log "Error setting completion text: %s" err)))
-      (when (and cody-enable-completion-cycling-help
-                 (cody--multiple-items-p cc))
-        (message "Showing suggestion %s of %s (%s/%s to cycle)"
-                 (1+ index)
-                 (cody--num-items cc)
-                 (cody--key-for-command #'cody-next-completion)
-                 (cody--key-for-command #'cody-prev-completion))))))
+  (when-let*
+      ((cc (cody--cc))
+       (item (cody--current-item cc))
+       (range (cody--completion-item-range item))
+       (range-start (cody--range-start range))
+       (original-text (buffer-substring-no-properties
+                       range-start (cody--range-end range)))
+       (insert-text (let ((text (cody--completion-text cc)))
+                      (cond
+                       ((null text) nil)
+                       ((string-match-p "[[:graph:]]" text) text)
+                       ;; Bail if suggestion is all-whitespace; the team
+                       ;; says this is a bug.  If it repros reliably,
+                       ;; they have asked that you let them know.
+                       (t (error "Completion text is blank: %s" text)))))
+       (lines (split-string insert-text "\r?\n"))
+       ;; We treat the 1st line specially: the completion may rewrite it.
+       (insert-text-1st-line (car-safe lines))
+       ;; We treat the 2nd and following lines as a single unit of text.
+       (multiline-insert-text (mapconcat #'identity (cdr lines) "\n"))
+       ;; Skip completions that need to delete or change characters in the
+       ;; existing document. Harder to support, and most clients don't.
+       (only-inserts
+        (cl-loop for chunk in (cody-diff-strings original-text
+                                                 insert-text-1st-line)
+                 never (eq (car-safe chunk) '-)))
+       ;; Run Myers diff between the existing text in the document and the
+       ;; first line of the `insertText` that is returned from the agent.
+       ;; The diff algorithm returns a list of "deltas" that give us the
+       ;; minimal number of additions we need to make to the buffer text.
+       ;; Insertions are a list of the form '((buffer-pos . text) ...)
+       (inserts (cody-diff-strings-with-positions original-text
+                                                  insert-text-1st-line
+                                                  range-start)))
+    ;; TODO: log completion suggested with item's id
+    (condition-case err
+        ;; Add one overlay span per delta in the first line.
+        (cl-loop
+         for (pos . text) in inserts
+         for rest = (when (> (length multiline-insert-text) 0)
+                      multiline-insert-text)
+         do (cody--make-overlay text pos)
+         finally do
+         ;; Add Cody marker to the end of the first line.
+         (cody--add-completion-marker (car-safe (last cody--overlay-deltas)))
+         ;; Insert following lines, if any, as a single block.
+         (when rest (cody--make-overlay rest pos))
+         (setf (cody--current-item-index cc) index)
+         (when (and cody-enable-completion-cycling-help
+                    (cody--multiple-items-p cc))
+           (message "Showing suggestion %s of %s (%s/%s to cycle)"
+                    (1+ index)
+                    (cody--num-items cc)
+                    (cody--key-for-command #'cody-next-completion)
+                    (cody--key-for-command #'cody-prev-completion))))
+      (error
+       (cody--log "Error setting completion text: %s" err)
+       (cody--hide-completion)))))
 
-(defun cody--overlay-set-text (text)
-  "Update overlay TEXT and redisplay it at point."
-  ;; Record it, since `after-string' is cleared if we hide the completion.
-  (cody--update-display-text (cody--cc) text)
-  (let ((pretty-text (propertize text 'face 'cody-completion-face)))
-    (put-text-property 0 1 'cursor t pretty-text)
-    (overlay-put (cody--overlay) 'after-string pretty-text))
-  (cody--move-overlay (point) (point)))
+(defun cody--add-completion-marker (ovl)
+  "Put a Cody symbol at the end of overlay OVL."
+  (condition-case err
+      (when (and t (overlayp ovl))
+        (overlay-put ovl 'after-string
+                     (concat (or (overlay-get ovl 'after-string) "")
+                             (propertize " " 'display (cody-logo-small)))))
+    (error (cody-log "Error showing completion marker: %s" err))))
 
-(defun cody--move-overlay (beg end)
-  "Safely move cody overlay to BEG and END, creating it if needed."
-  (save-excursion
-    (move-overlay (cody--overlay) beg end)))
-
-(defun cody--overlay-insert-front (_ovl after-p beg _end &optional len)
+(defun cody--overlay-insert-front (ovl after-p beg _end &optional len)
   "Allow user to type over the overlay character by character."
-  (save-excursion
-    (when (and after-p
-               (cody--overlay-visible-p)
-               (numberp len)
-               (zerop len)) ; Length 0 means it is an insertion.
-      (let ((text (cody--completion-text (cody--cc)))
-            (c (char-after beg))) ; char they just typed
-        (cond
-         ((/= c (aref text 0)) ; typed something different
-          (unless (eq (char-syntax c) ?\s)
-            (cody--hide-completion))) ; hide if not whitespace
-         ((= 1 (length text))
-          (cody--accept-completion)) ; fully consumed
-         (t
-          (cody--shorten-completion)))))))
+  (when (and after-p
+             (cody--overlay-visible-p)
+             (numberp len)
+             (zerop len)) ; Length 0 means it is an insertion.
+    (when-let ((text (cody--overlay-get-text ovl))
+               (first (string-to-char text))
+               (typed (char-after beg))) ; char they just typed
+      (cond
+       ;; TODO: Handle backspace.
+       ((/= first typed) ; typed something different
+        ;; Allow them to type whitespace and push the suggestion over
+        (unless (eq (char-syntax typed) ?\s)
+          (cody--hide-completion))) ; hide if not whitespace
+       ((= 1 (length text))
+        (cody--accept-completion)) ; fully consumed
+       (t
+        (cody--shorten-completion ovl))))))
 
-(defun cody--shorten-completion ()
-  "Consume the first character of the current completion."
-  (when-let* ((cc cody--completion)
-              (text (cody--completion-text cc))
-              (shortened (substring text 1)))
-    (cody--overlay-set-text shortened)))
+(defun cody--shorten-completion (overlay)
+  "Consume the first character of the current completion.
+OVERLAY is the relevant completion fragment."
+  (cody--overlay-set-text overlay
+                          (substring
+                           (cody--overlay-get-text overlay) 1)))
 
 (defun cody--hide-completion ()
   "Stop showing the completion suggestion."
-  (overlay-put (cody--overlay) 'after-string "")
-  (cody--move-overlay 1 1)
-  (setf (cody--current-item-index (cody--cc)) 0))
+  (mapc #'delete-overlay cody--overlay-deltas)
+  (setq cody--overlay-deltas nil)
+  (when cody--completion
+    (setf (cody--current-item-index (cody--cc)) 0)))
 
 (defun cody--maybe-clear-completion ()
   "Implements `post-command-hook' to clear completion if applicable."
@@ -1135,14 +1178,14 @@ EVENT is a Sourcegraph GraphQL event."
          (item (cody--current-item cc))
          (text (cody--completion-item-original-text item))
          (range (cody--completion-item-range item))
-         (start-pos (cody--range-start range))
-         (end-pos (cody--range-end range)))
-    (when (and start-pos end-pos text)
+         (range-start (cody--range-start range))
+         (range-end (cody--range-end range)))
+    (when (and range-start range-end text)
       (undo-boundary)
-      (delete-region start-pos end-pos)
-      (goto-char start-pos)
+      (delete-region range-start range-end)
+      (goto-char range-start)
       (insert text)
-      (indent-region start-pos (point)))
+      (indent-region range-start (point)))
     (cody--telemetry-completion-accepted)
     (jsonrpc-notify cody--connection 'autocomplete/clearLastCandidate nil)
     (cody--discard-completion)))
@@ -1153,10 +1196,8 @@ Sends telemetry notifications when telemetry is enabled."
   (cody--cancel-completion-timer)
   (unless (eq (cody--completion-status) 'triggered)
     (cody--telemetry-completion-suggested))
-  (when-let ((o cody--overlay))
-    (delete-overlay o))
-  (setq cody--overlay nil
-        cody--completion nil
+  (cody--hide-completion)
+  (setq cody--completion nil
         cody--completion-timestamps nil
         ;; Just to be clear, don't change this or the completion will resurrect.
         cody--last-completion-trigger-spot cody--last-completion-trigger-spot
@@ -1207,9 +1248,10 @@ DIRECTION should be 1 for next, and -1 for previous."
               (index (cody--current-item-index cc))
               (num (cody--num-items cc))
               (next (% (+ index direction num) num)))
-        (progn
-          (setf (cody--current-item-index cc) next)
-          (cody--display-completion next))
+        (condition-case err
+            (cody--display-completion next)
+          (error
+           (cody--log "Error displaying completion: %s \ncompletion: %s" err cc)))
       (when cody-enable-completion-cycling-help
         (message "Error cycling through completions"))
       (cody--log "Error cycling through completions: items= %s" items))))
