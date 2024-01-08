@@ -43,8 +43,8 @@ Returns nil if there are any deletions in the diff."
   "Convert PATCH, a list of patch chunks, into position-based inserts.
 
 START-POS is the buffer position corresponding to the beginning of the
-code rewrites for the line, and may be at the beginning of the current line,
-before point, but not before `line-beginning-position'.
+code rewrites for the line, and may be at the beginning of the current 
+line, before point, but not before `line-beginning-position'.
 
 The Myers diff algorithm returns patches that take the form of a
 list of chunks which are either atoms representing unchanged
@@ -55,8 +55,8 @@ Example:
     (C B (+ A) B A (+ C))
 
 We rewrite this list to compute the character position of each
-insertion, discarding the unchanged characters, which are used
-to count the buffer position for each patch chunk.
+insertion, discarding the unchanged characters, which are used to
+count the buffer position for each patch chunk.
 
 If any element of the passed PATCH is a deletion such as `(- A B)',
 this function returns nil."

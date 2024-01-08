@@ -9,7 +9,8 @@
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "1.2"))
 
 ;;; Commentary:
-;; Load this package and then add `(cody-start)' to your .emacs
+;; Add something like `(add-hook 'prog-mode-hook 'cody-mode)' to start
+;; cody automatically in buffers, or `M-x cody-mode' to
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
@@ -27,13 +28,6 @@
   "Directory which Cody considers your current project root."
   :group 'cody
   :type 'string)
-
-(defcustom cody-auto-enable-cody-mode t
-  "Non-nil to enable Cody commands in all relevant buffers.
-You can set this to nil if you need to run Cody only in a chat session,
-or if you prefer to set up your own rules for enabling `cody-mode'."
-  :group 'cody
-  :type 'boolean)
 
 (defcustom cody-enable-completion-cycling t
   "Non-nil to allow cycling among alternative completion suggestions.
@@ -427,6 +421,7 @@ You can override it with `cody-workspace-root'."
 
 (put 'cody--minor-mode-icon 'risky-local-variable t)
 
+;;;###autoload
 (define-minor-mode cody-mode
   "Minor mode for interacting with the Cody coding assistant.
 Changes to the buffer will be tracked by the Cody agent"
@@ -471,24 +466,6 @@ A heuristic to see if we should notify the agent about it."
        (not
         (memq (with-current-buffer buf buffer-file-coding-system)
               '(nil raw-text binary no-conversion)))))
-
-(defun cody--enable-cody-mode ()
-  "Enables `cody-mode' for any applicable open buffers.
-This may be on a background thread, since there may be many files open
-in the user's Emacs session when they start or restart Cody."
-  ;; Selectively turn on `cody-mode' for newly opened files.
-  (add-hook 'find-file-hook #'cody--maybe-turn-on-cody-mode)
-  ;; Selectively turn on `cody-mode' for applicable open buffers.
-  (cl-loop with file-count = 0
-           and cody-count = 0
-           for buf being the buffers
-           do
-           (with-current-buffer buf
-             (cody--maybe-turn-on-cody-mode)
-             (if cody-mode (cl-incf cody-count)))
-           (cl-incf file-count)
-           finally (cody--log "Scanned %s buffers, enabled Cody in %s"
-                              file-count cody-count)))
 
 (defun cody--maybe-turn-on-cody-mode ()
   "Maybe enable `cody-mode' on a newly opened file.
@@ -637,7 +614,7 @@ The return value is appropiate for sending directly to the rpc layer."
     (chat/updateMessageInProgress
      (cody--handle-chat-update params))
     (shutdown ; Server initiated shutdown.
-     (cody-shutdown))))
+     (cody-logout))))
 
 (defun cody--kill-buffer-function ()
   "If we are killing the last buffer visiting this file, notify agent."
@@ -712,15 +689,15 @@ Cody chat buffer should be current, and PARAMS non-nil."
            ((>= (length new-text) (length old-text))
             (substring new-text (length old-text)))
            (t
-            ;; This could happen if the generator "backs up",
-            ;; which I've seen happen with ChatGPT, so we'll
-            ;; likely need to handle this at some point.
+            ;; This could happen if the generator "backs up", which I've
+            ;; seen happen with ChatGPT, so we'll likely need to handle
+            ;; this at some point.
             ""))))
     (let ((inhibit-read-only t))
       (insert tail))
     (setq cody--message-in-progress new-text)))
 
-(defun cody-shutdown ()
+(defun cody-logout ()
   "Stop the Cody agent process and turn Cody off globally."
   (interactive)
   (dolist (buf (buffer-list))
@@ -743,7 +720,7 @@ Cody chat buffer should be current, and PARAMS non-nil."
 (defun cody-force-unload ()
   "Shut down Cody and remove all Cody-related buffers."
   (interactive)
-  (cody-shutdown)
+  (cody-logout)
   (ignore-errors
     (kill-buffer (cody--chat-buffer)))
   (ignore-errors
@@ -772,7 +749,8 @@ Cody chat buffer should be current, and PARAMS non-nil."
                    :humanChatInput chat))
   (message "Cody recipe sent."))
 
-(defun cody-start (&optional quiet)
+;;;###autoload
+(defun cody-login (&optional quiet)
   "Start the Cody agent. Optionally enables `cody-mode' in buffers.
 This function is idempotent and only starts a new connection if needed.
 Turning on `cody-mode' is set by the `cody-auto-enable-cody-mode'
@@ -786,36 +764,20 @@ there is a connection."
     (setq cody--node-version-status nil) ; re-check node version on start
     (message "Initializing Cody connection...")
     (cody--connection)
-    (message "Cody connection initialized.")
-    (when cody-auto-enable-cody-mode
-      (cody--init-cody-mode))))
-
-(defun cody--init-cody-mode ()
-  "Start an agent if needed, and enable Cody in applicable buffers."
-  ;; TODO: Add a customization option to not auto-enable cody-mode
-  ;; for all buffers, and instead the user can invoke cody-mode manually
-  ;; or set up their own rules for toggling it. As one example driving this
-  ;; use case, the user might only want to have a chat session open, but
-  ;; not want Cody tracking all their other buffers.
-  (if cody--use-threads
-      ;; N.B. Debugger is unable to exit if there's an error in the thread function.
-      (make-thread (lambda ()
-                     (cody--enable-cody-mode))
-                   "Cody startup thread")
-    (cody--enable-cody-mode)))
+    (message "Cody connection initialized.")))
 
 (defun cody-restart ()
-  "Shut down and restart Cody.  Mostly for debugging."
+  "Shut down and restart Cody. Mostly for debugging."
   (interactive)
   (let ((cody--node-version-status 'good))
     (ignore-errors
-      (cody-shutdown)))
+      (cody-logout)))
   (setq cody--node-version-status nil)
-  (cody-start))
+  (cody-login))
 
 (defun cody-unload-function ()
   "Handle `unload-feature' for this package."
-  (cody-shutdown))
+  (cody-logout))
 
 (defun cody--log (msg &rest args)
   "Log MSG with ARGS, currently just for debugging."
@@ -823,11 +785,12 @@ there is a connection."
     (goto-char (point-max))
     (insert (apply #'format msg args) "\n")))
 
+;;;###autoload
 (defun cody-chat ()
   "Shorthand for the chat recipe.
 Query and output go into the *cody-chat* buffer."
   (interactive)
-  (cody-start)
+  (cody-login)
   (display-buffer (cody--chat-buffer))
   (let ((query (read-from-minibuffer "Ask Cody: ")))
     (cody--chat-insert-query query)
@@ -1021,11 +984,12 @@ KIND specifies whether this was requested manually or automatically"
   "Parse RESPONSE and return a populated `cody-completion' object."
   (make-instance
    'cody-completion
-   :items (vconcat (mapcar (lambda (item)
-                             (make-instance 'cody-completion-item
-                                            :insertText (plist-get item :insertText)
-                                            :range (plist-get item :range)))
-                           (plist-get response :items)))
+   :items (vconcat
+           (mapcar (lambda (item)
+                     (make-instance 'cody-completion-item
+                                    :insertText (plist-get item :insertText)
+                                    :range (plist-get item :range)))
+                   (plist-get response :items)))
    :response response
    :completionEvent (plist-get response :completionEvent)))
 
@@ -1122,7 +1086,7 @@ INDEX is the completion alternative to display from RESPONSE."
         (overlay-put ovl 'after-string
                      (concat (or (overlay-get ovl 'after-string) "")
                              (propertize " " 'display (cody-logo-small)))))
-    (error (cody-log "Error showing completion marker: %s" err))))
+    (error (cody--log "Error showing completion marker: %s" err))))
 
 (defun cody--overlay-insert-front (ovl after-p beg _end &optional len)
   "Allow user to type over the overlay character by character."
@@ -1285,6 +1249,14 @@ DIRECTION should be 1 for next, and -1 for previous."
             (insert "Cody is connected")
           (insert "Cody is not connected"))))
     (pop-to-buffer buf)))
+
+(defun cody-doctor ()
+  "Diagnose and troubleshoot Cody issues."
+  (interactive)
+  ;; Obviously lots more to do here.
+  (if (cody--alive-p)
+      (message "Cody is running! Try `M-x cody-chat' to get started.")
+    (message "Cody is not running. 'M-x cody-login' to start hacking.")))
 
 ;;;==== Telemetry ==============================================================
 
