@@ -10,7 +10,8 @@
 
 ;;; Commentary:
 ;; Add something like `(add-hook 'prog-mode-hook 'cody-mode)' to start
-;; cody automatically in buffers, or `M-x cody-mode' to
+;; cody automatically in buffers. Make sure your nodejs "node"
+;; executable is in your emacs `exec-path'.
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
@@ -163,12 +164,20 @@ Returns nil if it cannot find it for any reason."
 The node version is only checked on Cody startup.
 You can call `cody-restart' to force it to re-check the version.")
 
-(defvar cody-node-path-override nil
-  "Hardwired path to the node.js binary to use for Cody.")
+(defcustom cody-node-executable nil
+  "Hardwired path to the nodejs binary to use for Cody.
+If nil, Cody will search for node using `exec-path'."
+  :type 'string
+  :group 'cody)
+
+(defcustom cody--node-min-version "20.4.0"
+  "The minimum required version of Node.js."
+  :type 'string
+  :group 'cody)
 
 (defun cody--agent-command ()
   "Command and arguments for running agent."
-  (list (or cody-node-path-override "node") cody--cody-agent))
+  (list (or cody-node-executable "node") cody--cody-agent))
 
 (defvar cody--connection nil "Global jsonrpc connection to Agent.")
 (defvar cody--message-in-progress nil "Chat message accumulator.")
@@ -245,7 +254,7 @@ Each time we request a new completion, it gets discarded and replaced.")
   "Wait at least this long between notifications of buffer content changes.")
 
 (defface cody-completion-face
-  '((t :inherit shadow :slant italic :foreground "#4c8da3"))
+  '((t :inherit shadow :slant italic :foreground "#4c8da3" :background "#ffffcd"))
   "Face for Cody completion overlay.")
 
 (defsubst cody--timestamp ()
@@ -312,27 +321,20 @@ Each time we request a new completion, it gets discarded and replaced.")
     (jsonrpc-notify cody--connection 'initialized nil))
   cody--connection)
 
-(defcustom cody--node-min-version "20.4.0"
-  "The minimum required version of Node.js."
-  :type 'string
-  :group 'cody)
-
 (defun cody--check-node-version ()
-  "Signal an error the default node.js is not a high enough version.
-Version is configurable with `cody--node-min-version'."
+  "Signal an error if the default node.js version is too low.
+Min version is configurable with `cody--node-min-version'."
   (cl-case cody--node-version-status
     (good t)
-    (bad (error
-          "Installed Node.js must be at least %s - see `cody-node-path-override'"
-          cody--node-min-version))
+    (bad (error "Installed nodejs must be at least %s." cody--node-min-version))
     (otherwise
-     (let* ((cmd (concat (or cody-node-path-override "node") " -v"))
+     (let* ((cmd (concat (or cody-node-executable "node") " -v"))
             (node-version (string-trim (shell-command-to-string cmd)))
             minor major patch)
        (if (not (string-match "^v\\([0-9]+\\)\\.\\([0-9]+\\)\\.\\([0-9]+\\)"
                               node-version))
            (progn
-             (message "Error: Could not parse node.js version string: %s"
+             (message "Error: Could not parse nodejs version string: %s"
                       node-version)
              nil)
          (setq major (string-to-number (match-string 1 node-version))
@@ -350,7 +352,7 @@ Version is configurable with `cody--node-min-version'."
                (setq cody--node-version-status 'good)
              (setq cody--node-version-status 'bad)
              (error
-              "Error: Installed Node.js version %s is lower than min version %s"
+              "Error: Installed nodejs version %s is lower than min version %s"
               node-version cody--node-min-version))))))))
 
 (defun cody--workspace-root ()
@@ -618,12 +620,15 @@ The return value is appropiate for sending directly to the rpc layer."
 
 (defun cody--kill-buffer-function ()
   "If we are killing the last buffer visiting this file, notify agent."
-  (when (and cody-mode
-             buffer-file-name
-             (cody--last-buffer-for-file-p))
-    (jsonrpc-notify (cody--connection) 'textDocument/didClose
-                    (list :filePath buffer-file-name))
-    (cody--log "Notified agent closed %s" buffer-file-name)))
+  (let ((bufname buffer-file-name))
+    (condition-case err
+        (when (and cody-mode
+                   bufname
+                   (cody--last-buffer-for-file-p))
+          (jsonrpc-notify (cody--connection) 'textDocument/didClose
+                          (list :filePath bufname))
+          (cody--log "Notified agent closed %s" bufname))
+      (error "Error notifying agent closing %s" bufname))))
 
 (defun cody--last-buffer-for-file-p ()
   "Check if the current buffer is the last one visiting its file.

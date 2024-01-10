@@ -41,7 +41,7 @@ In the future it should probably work more like ChatGPT or a shell.
 
 * Debugging
 
-  `M-x cody-start` to start and initialize the agent without doing a command
+  `M-x cody-login` to start and initialize the agent without doing a command
   `M-x cody-force-unload` to tear everything down
 
 #+begin_src emacs-lisp
