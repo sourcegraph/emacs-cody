@@ -10,8 +10,8 @@
 
 ;;; Commentary:
 ;; Add something like `(add-hook 'prog-mode-hook 'cody-mode)' to start
-;; cody automatically in buffers. Make sure your nodejs "node"
-;; executable is in your emacs `exec-path'.
+;; cody automatically in code buffers.  Make sure your nodejs "node"
+;; executable is in your Emacs `exec-path'.
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
@@ -117,7 +117,8 @@ use manual completion triggering with `cody-request-completion'."
   (> (cody--num-items cc) 1))
 
 (cl-defmethod cody--current-item ((cc cody-completion))
-  "Return the currently displayed `cody-completion-item', or nil."
+  "Return the currently displayed variable `cody-completion-item', or nil.
+Argument CC is the completion object."
   (ignore-errors
     (aref (cody--completion-items cc) (cody--current-item-index cc))))
 
@@ -166,7 +167,7 @@ You can call `cody-restart' to force it to re-check the version.")
 
 (defcustom cody-node-executable nil
   "Hardwired path to the nodejs binary to use for Cody.
-If nil, Cody will search for node using `exec-path'."
+If nil, Cody will search for node using variable `exec-path'."
   :type 'string
   :group 'cody)
 
@@ -228,7 +229,7 @@ with the Cody Agent.")
 
 (defvar-local cody--completion nil
   "Most recent completion response object from the Cody Agent.
-This is an instance of a `cody-completion' object, which see.
+This is an instance of a variable `cody-completion' object, which see.
 Each time we request a new completion, it gets discarded and replaced.")
 
 (defvar cody--completion-timer nil
@@ -286,7 +287,7 @@ Each time we request a new completion, it gets discarded and replaced.")
         :codebase "https://github.com/sourcegraph/cody"))
 
 (defun cody--request (method &rest params)
-  "Helper to send a Cody request."
+  "Helper to send a Cody request for METHOD with PARAMS."
   ;; TODO: Make requests cancellable and implement $/cancelRequest.
   (jsonrpc-request (cody--connection) method params))
 
@@ -377,7 +378,8 @@ You can override it with `cody-workspace-root'."
            (create-image (cody-logo-file "cody-logo-small.png")))))
 
 (defun cody-logo-file (file-base)
-  "Construct path to bundled cody image file."
+  "Construct path to bundled cody image file.
+Argument FILE-BASE is the file base name sans directory."
   (file-name-concat ; hack the Cody logo path
    ;; wtf emacs why is there no parent-directory function?
    (file-name-directory (directory-file-name
@@ -403,7 +405,8 @@ You can override it with `cody-workspace-root'."
   "Keymap for Cody mode line button.")
 
 (defun cody-propertize-icon (text-or-image)
-  "Return propertized string or image for `cody--minor-mode-icon`."
+  "Return propertized string or image for `cody--minor-mode-icon`.
+Argument TEXT-OR-IMAGE is the string or image to propertize."
   (propertize (if (stringp text-or-image) text-or-image " ")
               'display (if (stringp text-or-image) nil text-or-image)
               'help-echo "Cody mode - click for menu"
@@ -411,7 +414,7 @@ You can override it with `cody-workspace-root'."
               'keymap cody-mode-line-map))
 
 (defun cody--decorate-mode-line-lighter (image)
-  "Uses the passed IMAGE for the mode line lighter."
+  "Use the passed IMAGE for the mode line lighter."
   (if-let ((img (and (display-graphic-p) image)))
       ;; Hack - bump the image up a bit vertically using :ascent, to center it.
       (cody-propertize-icon (cons 'image (plist-put (cdr img) :ascent 80)))
@@ -503,30 +506,33 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
 (defun cody--flush-pending-changes ()
   "If there is pending data, send it to the agent."
   (when-let ((had-pending-changes-p (cody--cancel-debounce-timer)))
-    (cody--sync-buffer-to-agent 'textDocument/didChange)))
+    (cois the protocol operation, e.g. `textDocument/didChange'.dy--sync-buffer-to-agent 'textDocument/didChange)))
 
 (defun cody--sync-buffer-to-agent (operation)
   "Send the full file contents to the agent with OPERATION."
   (cody--send-file-to-agent (current-buffer) operation))
 
 (defun cody--send-file-to-agent (buf op)
-  "Make the jsonrpc call to notify agent of opened/changed file."
-  ;; TODO: Use condition-case
-  (ignore-errors
-    (when cody-mode
-      (let ((happy nil))
-        (unwind-protect
-            (progn
-              (with-current-buffer buf
-                (jsonrpc-notify (cody--connection) op
-                                (list
-                                 :filePath (buffer-file-name buf)
-                                 :content (buffer-substring-no-properties (point-min)
-                                                                          (point-max))
-                                 :selection (cody--selection buf)))))
-          (setq happy t))
-        (unless happy
-          (cody--log "Unable to update Cody agent for %s" buffer-file-name))))))
+  "Make the jsonrpc call to notify agent of opened/changed file.
+Argument BUF is the buffer whose contents will be sent.
+Argument OP is the protocol operation, e.g. `textDocument/didChange'."
+  (condition-case err
+      (when cody-mode
+        (let ((happy nil))
+          (unwind-protect
+              (progn
+                (with-current-buffer buf
+                  (jsonrpc-notify
+                   (cody--connection) op
+                   (list
+                    :filePath (buffer-file-name buf)
+                    :content (buffer-substring-no-properties (point-min)
+                                                             (point-max))
+                    :selection (cody--selection buf)))))
+            (setq happy t))
+          (unless happy
+            (cody--log "Unable to update Cody agent for %s" buffer-file-name))))
+    (error (cody--log "Error sending file %s: %s" buffer-file-name err))))
 
 (defun cody--post-command-function ()
   "If point or mark has moved, update selection/focus with agent.
@@ -579,7 +585,7 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
       (cody--start-completion-timer))))
 
 (defun cody--start-completion-timer ()
-  "Sets a cancellable timer to check for an automatic completion."
+  "Set a cancellable timer to check for an automatic completion."
   (setq cody--completion-timer
         (run-with-idle-timer 0 nil #'cody--maybe-trigger-completion)))
 
