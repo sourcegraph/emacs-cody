@@ -72,12 +72,9 @@ this function returns nil."
                 (_ (cl-incf pos))) ; Handle unchanged characters
            finally return (nreverse inserts)))
 
-;; I found this code here: http://perma-curious.eu/post-elisp-diff/
-;; There is no license referenced with it. I've contacted the author
-;; and asked if we can use it; if that falls through it's easy to reimplement;
-;; it's just a memoized port of http://www.lispology.com/show?1H95
-;; which is a dirt-simple recursive expression of the Myers algorithm.
-;; I fixed a bug with diffing lists of strings, and renamed the cache var.
+;; Implementation courtesy of Michael Bauer <michael-bauer@posteo.de>,
+;; http://perma-curious.eu/post-elisp-diff/, who has given his permission
+;; to use it.
 
 (defun cody--diff-worker (a b)
   "Diff A and B.
