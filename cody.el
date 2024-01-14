@@ -28,14 +28,66 @@
 
 (defgroup cody nil
   "Sourcegraph Cody."
-  :group 'programming)
+  :group 'programming
+  :prefix "cody-")
+
+(defcustom cody-telemetry-enable-p t
+  "Non-nil to allow anonymized event/usage telemetry.
+This information is used by Sourcegraph to improve the product."
+  :group 'cody
+  :type 'boolean)
 
 (defcustom cody-workspace-root (getenv "HOME")
   "Directory which Cody considers your current project root."
   :group 'cody
   :type 'string)
 
-(defcustom cody-enable-completion-cycling t
+(defcustom cody-node-executable nil
+  "Hardwired path to the nodejs binary to use for Cody.
+If nil, Cody will search for node using variable `exec-path'."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody--node-min-version "20.4.0"
+  "The minimum required version of Node.js."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody--anonymized-uuid nil
+  "A generated ID for telemetry, to tie usage events together.
+This is generated and cached on first use, if telemetry is enabled."
+  :type 'string
+  :group 'cody)
+
+(defgroup cody-completions nil
+  "Code autocompletion options."
+  :group 'cody
+  :prefix "cody-completion-"
+  :prefix "cody-completions-")
+
+(defcustom cody-completions-auto-trigger-p t
+  "Non-nil to have Cody prompt with suggestions automatically.
+Completion suggestions will appear after you stop typing for a while,
+if any suggestions are available.  Set this to nil if you prefer to
+use manual completion triggering with `cody-request-completion'."
+  :group 'cody-completions
+  :type 'boolean)
+
+(defcustom cody-completions-display-marker-p t
+  "Non-nil to display completion markers in the minibuffer.
+This helps distinguish Cody's completions from other packages."
+  :group 'cody-completions
+  :type 'boolean)
+
+(defface cody-completion-face
+  '((t :inherit shadow
+       :slant italic
+       ;;:background "#ffffcd" ; uncomment for debugging overlay spans
+       :foreground "#4c8da3"))
+  "Face for Cody completion overlay."
+  :group 'cody-completions)
+
+(defcustom cody-completions-enable-cycling-p t
   "Non-nil to allow cycling among alternative completion suggestions.
 These are not always available, but when they are, you can cycle
 between them with `cody-next-completion' and `cody-prev-completion'.
@@ -44,39 +96,13 @@ returned by the server is ever displayed or interactible."
   :group 'cody
   :type 'boolean)
 
-(defcustom cody-enable-completion-cycling-help t
+(defcustom cody-completions-cycling-help-p t
   "Non-nil to show a message in the minibuffer for cycling completions.
 If non-nil, and multiple completion suggestions are returned from the
 server, it will show how many are available and how to cycle them.
 If nil, no messages are printed when cycling is available or used."
-  :type 'boolean
-  :group 'cody)
-
-(defcustom cody-enable-telemetry t
-  "Non-nil to allow anonymized event/usage telemetry.
-This information is used by Sourcegraph to improve the product."
-  :type 'boolean
-  :group 'cody)
-
-(defcustom cody--anonymized-uuid nil
-  "A generated ID for telemetry, to tie usage events together.
-This is generated and cached on first use, if telemetry is enabled."
-  :type 'string
-  :group 'cody)
-
-(defcustom cody-enable-automatic-completions t
-  "Non-nil to have Cody prompt with suggestions automatically.
-Completion suggestions will appear after you stop typing for a while,
-if any suggestions are available.  Set this to nil if you prefer to
-use manual completion triggering with `cody-request-completion'."
-  :type 'boolean
-  :group 'cody)
-
-(defcustom cody-display-completion-marker t
-  "Non-nil to display completion markers in the minibuffer.
-This helps distinguish Cody's completions from other packages."
-  :type 'boolean
-  :group 'cody)
+  :group 'cody
+  :type 'boolean)
 
 ;;; Completions "API" for the rest of the lisp code:
 
@@ -159,25 +185,6 @@ Argument CC is the completion object."
 The node version is only checked on Cody startup.
 You can call `cody-restart' to force it to re-check the version.")
 
-(defcustom cody-node-executable nil
-  "Hardwired path to the nodejs binary to use for Cody.
-If nil, Cody will search for node using variable `exec-path'."
-  :type 'string
-  :group 'cody)
-
-(defcustom cody--node-min-version "20.4.0"
-  "The minimum required version of Node.js."
-  :type 'string
-  :group 'cody)
-
-(defface cody-completion-face
-  '((t :inherit shadow
-       :slant italic
-       ;;:background "#ffffcd" ; uncomment for debugging overlay spans
-       :foreground "#4c8da3"))
-  "Face for Cody completion overlay."
-  :group 'cody)
-
 (defun cody--agent-command ()
   "Command and arguments for running agent."
   (list (or cody-node-executable "node") cody--cody-agent))
@@ -203,7 +210,7 @@ If nil, Cody will search for node using variable `exec-path'."
     (define-key map (kbd "TAB") 'cody--tab-key) ; accept completions
     (define-key map (kbd "C-g") 'cody--ctrl-g-key)
     (define-key map (kbd "ESC ESC ESC") 'cody--ctrl-g-key)
-    (when cody-enable-completion-cycling
+    (when cody-completions-enable-cycling-p
       (define-key map (kbd "M-n") 'cody-next-completion)
       (define-key map (kbd "M-p") 'cody-prev-completion))
     map)
@@ -530,7 +537,7 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
                     :filePath (buffer-file-name buf)
                     :content (buffer-substring-no-properties (point-min)
                                                              (point-max))
-                    :selection (cody--selection buf)))))
+                    :selection (cody--selection-get-current buf)))))
             (setq happy t))
           (unless happy
             (cody--log "Unable to update Cody agent for %s" buffer-file-name))))
@@ -560,9 +567,9 @@ Installed on `post-command-hook', which see."
                (mark-moved (not (eq last-mark (or (mark) (point))))))
           (when (or point-moved mark-moved)
             (cody--handle-focus-changed last-point))))
-    (error (ignore-errors
-             (cody--log "error in post-command-function %s: %s"
-                        last-command err)))))
+    (error
+     (ignore-errors ; don't risk an error or our hook deregisters
+       (cody--log "error in post-command-function %s: %s" last-command err)))))
 
 (defun cody--handle-focus-changed (cursor-moved-p)
   "Notify agent that cursor or selection has changed in current buffer.
@@ -574,7 +581,8 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
                     (list
                      :filePath (buffer-file-name (current-buffer))
                      ;; Specifically leave :content undefined here.
-                     :selection (cody--selection (current-buffer))))
+                     :selection (cody--selection-get-current
+                                 (current-buffer))))
     ;; Maybe set a timer to trigger an automatic completion.
     ;; Do some trivial rejects here before setting the timer.
     (when (and cursor-moved-p
@@ -596,8 +604,9 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
     (cancel-timer cody--completion-timer)
     (setq cody--completion-timer nil)))
 
-(defun cody--selection (buf)
+(defun cody--selection-get-current (buf)
   "Return the jsonrpc parameters representing the selection in BUF.
+If the region is not active, the selection is zero-width at point.
 BUF can be a buffer or buffer name, and we return a Range with `start'
 and `end' parameters, each a Position of 1-indexed `line' and `character'.
 The return value is appropiate for sending directly to the rpc layer."
@@ -966,7 +975,7 @@ and the start of the overlay."
 (defun cody--maybe-trigger-completion ()
   "Under the right conditions, trigger an automatic completion request."
   (when (and cody-mode
-             cody-enable-automatic-completions
+             cody-completions-auto-trigger-p
              (not (cody--overlay-visible-p))
              (not (use-region-p))
              (cody--completion-syntactically-eligible-p))
@@ -1113,7 +1122,7 @@ RESPONSE is the entire jsonrpc response."
          ;; Insert following lines, if any, as a single block.
          (when (and next-lines (cl-plusp (length next-lines)))
            (cody--make-overlay next-lines pos))
-         (when (and cody-enable-completion-cycling-help
+         (when (and cody-completions-cycling-help-p
                     (cody--multiple-items-p cc))
            (message "Showing suggestion %s of %s (%s/%s to cycle)"
                     (1+ index)
@@ -1160,7 +1169,7 @@ Returns nil if the text does not pass the sanitizing checks."
 
 (defun cody--add-completion-marker (ovl)
   "Put a Cody symbol at the end of overlay OVL."
-  (when (and cody-display-completion-marker
+  (when (and cody-completions-display-marker-p
              (overlayp ovl))
     (condition-case err
         (let* ((text (or (overlay-get ovl 'after-string) ""))
@@ -1187,12 +1196,11 @@ BUFFER-TEXT and FIRST-LINE are the strings to diff."
   "Diff completion against first line and compute deltas.
 BUFFER-TEXT is the text being replaced by the suggested completion.
 FIRST-LINE is the first line of the suggested completion.
-RANGE-START is the start buffer position of the text being replaced."
-  ;; Run Myers diff between the existing text in the document and the
-  ;; first line of the `insertText` that is returned from the agent.
-  ;; The diff algorithm returns a list of "deltas" that give us the
-  ;; minimal number of additions we need to make to the buffer text.
-  ;; Insertions are a list of the form '((buffer-pos . text) ...)
+RANGE-START is the start buffer position of the text being replaced.
+Returns a list of insertions of the form ((buffer-pos . text) ...)."
+  ;; Agent protocol necessitates computing the character diffs between
+  ;; the current line in the buffer, and the suggested "completion",
+  ;; which acts more like a rewrite of the current line. 
   (condition-case err
       (cody-diff-strings-with-positions buffer-text
                                         first-line
@@ -1259,7 +1267,7 @@ Sends telemetry notifications when telemetry is enabled."
 (defun cody--check-cycle-preconditions ()
   "Return non-nil if we meet all the preconditions for cycling.
 If not, then it handles logging and messaging."
-  (let ((verbose (or cody-enable-completion-cycling-help
+  (let ((verbose (or cody-completions-cycling-help-p
                      (and (called-interactively-p 'interactive)
                           (memq this-command
                                 '(cody-next-completion cody-prev-completion)))))
@@ -1270,8 +1278,8 @@ If not, then it handles logging and messaging."
                       (cody--log output))
                     nil))) ; return nil to signal failed check
       (cond
-       ((not cody-enable-completion-cycling)
-        (explain "Set `cody-enable-completion-cycling' to enable cycling."))
+       ((not cody-completions-enable-cycling-p)
+        (explain "Set `cody-completions-enable-cycling-p' to enable cycling."))
        ((not (and cc (cody--current-item cc)))
         (explain "No completion here"))
        ((not (cody--multiple-items-p cc))
@@ -1296,16 +1304,16 @@ DIRECTION should be 1 for next, and -1 for previous."
                 (cody--display-completion))
             (error
              (cody--log "Error displaying completion: %s \ncompletion: %s" err cc)))
-        (when cody-enable-completion-cycling-help
+        (when cody-completions-cycling-help-p
           (message "Error cycling through completions"))
         (cody--log "Error cycling through completions: items= %s" items))
-    (when cody-enable-completion-cycling-help
+    (when cody-completions-cycling-help-p
       (message "No more suggestions. TAB to accept."))))
 
 (defun cody-next-completion ()
   "Move to the next completion alternative."
   (interactive)
-  (if (and cody-enable-completion-cycling
+  (if (and cody-completions-enable-cycling-p
            (cody--point-at-overlay-p))
       (cody--cycle-completion 1)
     (cody--execute-default-keybinding)))
@@ -1313,7 +1321,7 @@ DIRECTION should be 1 for next, and -1 for previous."
 (defun cody-prev-completion ()
   "Move to the previous completion alternative."
   (interactive)
-  (if (and cody-enable-completion-cycling
+  (if (and cody-completions-enable-cycling-p
            (cody--point-at-overlay-p))
       (cody--cycle-completion -1)
     (cody--execute-default-keybinding)))
@@ -1372,7 +1380,7 @@ DIRECTION should be 1 for next, and -1 for previous."
 
 (defun cody--telemetry-completion-accepted ()
   "Notify the telemetry collector that a completion was accepted."
-  (when cody-enable-telemetry
+  (when cody-telemetry-enable-p
     (when-let ((cc (cody--cc)))
       (cody-set-completion-event-prop cc :acceptedAt (cody--timestamp))
       (condition-case err
@@ -1385,7 +1393,7 @@ DIRECTION should be 1 for next, and -1 for previous."
 
 (defun cody--telemetry-completion-suggested ()
   "TODO: This needs to be rewritten asap for the new protocol."
-  (when cody-enable-telemetry
+  (when cody-telemetry-enable-p
     (when-let* ((cc (cody--cc))
                 (latency (max (- (cody--completion-timestamp :displayedAt)
                                  (cody--completion-timestamp :triggeredAt)) 0))
