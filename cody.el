@@ -9,9 +9,13 @@
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "1.2"))
 
 ;;; Commentary:
+;;
+;; Make sure your nodejs "node" executable is in your Emacs `exec-path'.
+;;
 ;; Add something like `(add-hook 'prog-mode-hook 'cody-mode)' to start
-;; cody automatically in code buffers.  Make sure your nodejs "node"
-;; executable is in your Emacs `exec-path'.
+;; cody automatically in new code buffers after logging into Cody.
+;;
+;; `M-x cody-login' to start using Cody.
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
@@ -20,6 +24,7 @@
 (require 'jsonrpc)
 (require 'uuidgen)
 (require 'cody-diff)
+(require 'cody-utils)
 
 (defgroup cody nil
   "Sourcegraph Cody."
@@ -67,6 +72,12 @@ use manual completion triggering with `cody-request-completion'."
   :type 'boolean
   :group 'cody)
 
+(defcustom cody-display-completion-marker t
+  "Non-nil to display completion markers in the minibuffer.
+This helps distinguish Cody's completions from other packages."
+  :type 'boolean
+  :group 'cody)
+
 ;;; Completions "API" for the rest of the lisp code:
 
 (defclass cody-completion-item ()
@@ -79,12 +90,7 @@ use manual completion triggering with `cody-request-completion'."
           :initform nil
           :type (or null list)
           :accessor cody--completion-item-range
-          :documentation "The range where the completion applies.")
-   (-displayText :initarg :displayText
-                 :initform nil
-                 :type (or null string)
-                 :accessor cody--display-text
-                 :documentation "The updated text as the user types."))
+          :documentation "The range where the completion applies."))
   "Represents a single alternative/suggestion in a completion response.")
 
 (defclass cody-completion ()
@@ -105,7 +111,7 @@ use manual completion triggering with `cody-request-completion'."
    (-current-item-index :initform 0
                         :type integer
                         :accessor cody--current-item-index
-                        :documentation "Index of currently selected completion alternative."))
+                        :documentation "Currently displayed alternative."))
   "Represents the entire JSON-RPC response for a requested completion.")
 
 (cl-defmethod cody--num-items ((cc cody-completion))
@@ -122,23 +128,11 @@ Argument CC is the completion object."
   (ignore-errors
     (aref (cody--completion-items cc) (cody--current-item-index cc))))
 
-(cl-defmethod cody--completion-original-text ((cc cody-completion))
-  "Return the original text for the currently displayed item from CC.
-Returns nil if it cannot find it for any reason."
-  (when-let ((item (cody--current-item cc)))
-    (cody--completion-item-original-text item)))
-
-(cl-defmethod cody--completion-display-text ((cc cody-completion))
-  "Return the up-to-date text for the currently displayed item from CC.
-Returns nil if it cannot find it for any reason."
-  (when-let ((item (cody--current-item cc)))
-    (oref item -displayText)))
-
 (cl-defmethod cody--completion-text ((cc cody-completion))
-  "Retrieve the text of the selected CC item."
+  "Retrieve the text of the selected variable `cody-completion-item'.
+Argument CC is the completion object."
   (when-let ((item (cody--current-item cc)))
-    (or (cody--display-text item)
-        (oref item insertText))))
+    (oref item insertText)))
 
 (cl-defmethod cody-set-completion-event-prop ((cc cody-completion) prop value)
   "Update the completion event in CC, setting PROP to VALUE."
@@ -176,6 +170,14 @@ If nil, Cody will search for node using variable `exec-path'."
   :type 'string
   :group 'cody)
 
+(defface cody-completion-face
+  '((t :inherit shadow
+       :slant italic
+       ;;:background "#ffffcd" ; uncomment for debugging overlay spans
+       :foreground "#4c8da3"))
+  "Face for Cody completion overlay."
+  :group 'cody)
+
 (defun cody--agent-command ()
   "Command and arguments for running agent."
   (list (or cody-node-executable "node") cody--cody-agent))
@@ -210,15 +212,14 @@ If nil, Cody will search for node using variable `exec-path'."
 (defvar cody-completion-map (make-sparse-keymap)
   "Keymap for cody completion overlay.")
 
-(defvar cody--use-threads t
-  "Non-nil to use threads; set to false for easier debugging.")
-
 (defvar cody--typewriter-effect nil
   "Non-nil to use typewriter effect in Cody chat output.")
 
 (defconst cody--mode-hooks
-  '((after-change-functions . cody--after-change)
+  '((before-change-functions . cody--before-change)
+    (after-change-functions . cody--after-change)
     (kill-buffer-hook . cody--kill-buffer-function)
+    (pre-command-hook . cody--pre-command-function)
     (post-command-hook . cody--post-command-function))
   "List of buffer-local hooks that Cody registers on in `cody-mode'.
 These hooks enable it to keep buffers and selections synced
@@ -244,19 +245,16 @@ Each time we request a new completion, it gets discarded and replaced.")
 (defvar-local cody--completion-timestamps nil
   "Tracks event timestamps for telemetry, as plist properties.")
 
-;; These are for keeping the agent notified about current file/selection.
-(defvar-local cody--last-point nil "The last point position.")
-(defvar-local cody--last-mark nil "The last mark position.")
-
 (defvar-local cody--update-debounce-timer nil
   "Delay for batching buffer-modification updates to the Agent.")
 
-(defconst cody--debounce-timer-delay 0.2
-  "Wait at least this long between notifications of buffer content changes.")
+(defvar cody--vars nil
+  "Symbol used as scratch space for ephemeral temp variables.
+Typically used for allowing before/after hooks to communicate data.
+Symbol properties are used reduce namespace clutter.")
 
-(defface cody-completion-face
-  '((t :inherit shadow :slant italic :foreground "#4c8da3" :background "#ffffcd"))
-  "Face for Cody completion overlay.")
+(defconst cody--debounce-timer-delay 0.05
+  "Wait at least this long between notifications of buffer content changes.")
 
 (defsubst cody--timestamp ()
   "Return seconds since epoch."
@@ -459,42 +457,46 @@ Changes to the buffer will be tracked by the Cody agent"
   (cody--discard-completion)
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
+  ;; Kill any zombie overlays; it can happen.
+  (cl-loop for overlay being the overlays in (current-buffer)
+           when (overlay-get overlay 'cody)
+           do (delete-overlay overlay))
   (setq cody-mode nil) ; this clears the modeline and other vars
   (cody--cancel-completion-timer)
   (message "Cody mode disabled"))
 
-(defun cody--text-file-p (buf)
-  "Return non-nil if BUF is visiting a text file.
-A heuristic to see if we should notify the agent about it."
-  ;; TODO: Maybe just ask the filesystem if it's a text file, instead?
-  (and (buffer-file-name buf)
-       (not
-        (memq (with-current-buffer buf buffer-file-coding-system)
-              '(nil raw-text binary no-conversion)))))
+(defun cody--before-change (beg end)
+  "Before the buffer is changed, remember the old contents.
+This is primarily so that we can detect when the user deleted
+whitespace backward before the point at the completion suggestion.
+BEG and END are as per the contract of `before-change-functions'."
+  ;; This is the only way to know what text was removed in deletions.
+  ;; Store it as a symbol property to avoid cluttering the namespace.
+  ;; I'm going to leave it here as it's generally useful, though it
+  ;; will be ignored until we get typing-in-completions working.
+  (condition-case err
+      (when (cody--overlay-visible-p)
+        (when (and
+               (/= beg end) ; if the change is to be a deletion
+               ;; We only support deletions limited to within the line.
+               (not (string-match-p "\n" (buffer-substring beg end))))
+          (put 'cody--vars 'deleted-text
+               (buffer-substring-no-properties beg end))))
+    (error (cody--log "Error in `cody-before-change': %s" err))))
 
-(defun cody--maybe-turn-on-cody-mode ()
-  "Maybe enable `cody-mode' on a newly opened file.
-Current buffer is visiting the file."
-  (when (cody--enable-for-buffer-p)
-    (cody--sync-buffer-to-agent 'textDocument/didOpen)
-    (cody-mode)))
-
-(defun cody--enable-for-buffer-p ()
-  "Return non-nil if Cody should be enabled for current buffer.
-Currently it means the buffer is visiting a text file on disk."
-  (and (cody--alive-p)
-       ;; TODO: Some way to customize how cody-mode is chosen for a buffer.
-       (cody--text-file-p (current-buffer))))
-
-;;; Code for change notifications and syncing with Agent.
-
-(defun cody--after-change (&rest _)
-  "Implement the `textDocument/didChange' notification.
+(defun cody--after-change (beg end len)
+  "Respond to any change made in the buffer.
+BEG, END and LEN are all defined by `after-change-hooks'.
 Installed on `after-change-functions' buffer-local hook in `cody-mode'."
+  ;; Kick off the `textDocument/didChange' notification.
   (unless cody--update-debounce-timer
     (setq cody--update-debounce-timer
           (run-with-idle-timer cody--debounce-timer-delay nil
-                               #'cody--flush-pending-changes))))
+                               #'cody--flush-pending-changes)))
+  (if (cody--overlay-visible-p)
+      ;; Either recompute or hide the overlay, based on the change.
+      (cody--handle-typing-while-suggesting beg end len)
+    (cody--start-completion-timer)))
 
 (defun cody--cancel-debounce-timer ()
   "Cancel debounce timer, returning non-nil if a timer was cancelled."
@@ -506,7 +508,7 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
 (defun cody--flush-pending-changes ()
   "If there is pending data, send it to the agent."
   (when-let ((had-pending-changes-p (cody--cancel-debounce-timer)))
-    (cois the protocol operation, e.g. `textDocument/didChange'.dy--sync-buffer-to-agent 'textDocument/didChange)))
+    (cody--sync-buffer-to-agent 'textDocument/didChange)))
 
 (defun cody--sync-buffer-to-agent (operation)
   "Send the full file contents to the agent with OPERATION."
@@ -534,39 +536,35 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
             (cody--log "Unable to update Cody agent for %s" buffer-file-name))))
     (error (cody--log "Error sending file %s: %s" buffer-file-name err))))
 
+(defun cody--pre-command-function ()
+  "Save the current point and mark position before each command.
+To cut down on namespace pollution they are stored as symbol
+properties of the symbol `cody--post-command-function'."
+  (put 'cody--vars 'last-point (point))
+  (put 'cody--vars 'last-mark (mark))
+  (put 'cody--vars 'last-hash (buffer-hash)))
+
 (defun cody--post-command-function ()
   "If point or mark has moved, update selection/focus with agent.
 Installed on `post-command-hook', which see."
-  (ignore-errors
-    (when cody-mode
-      (cody--debuggable-post-command))))
+  (condition-case err
+      (when (and (cody--overlay-visible-p)
+                 ;; Buffer modifications are handled by our
+                 ;; `after-change-functions'.
+                 (equal (get 'cody--vars 'last-hash) (buffer-hash)))
+        (let* ((last-point (get 'cody--vars 'last-point))
+               (last-mark (get 'cody--vars 'last-mark))
+               (point-moved (not (eq last-point (point))))
+               ;; If the mark isn't set, pretend it is set at point,
+               ;; yielding a zero-width range for the current selection.
+               (mark-moved (not (eq last-mark (or (mark) (point))))))
+          (when (or point-moved mark-moved)
+            (cody--handle-focus-changed last-point))))
+    (error (ignore-errors
+             (cody--log "error in post-command-function %s: %s"
+                        last-command err)))))
 
-(defun cody--debuggable-post-command ()
-  "Set your breakpoint for `cody--post-command-function` here instead."
-  (ignore-errors
-    (cody--maybe-clear-completion))
-  (cody--handle-typing-in-completion)
-  (cody--notify-if-focus-changed))
-
-(defun cody--handle-typing-in-completion ()
-  "If the user is typing within the completion, keep it in sync."
-  (when-let ((o (cody--point-at-overlay-p)))
-    (cody--shorten-completion o)))
-
-(defun cody--notify-if-focus-changed ()
-  "Check whether the Agent should be notified of a focus/selection change."
-  (let ((point-unequal (not (eq cody--last-point (point))))
-        ;; If the mark isn't set (nil), we pretend it is set at point,
-        ;; yielding a zero-width range for the current selection.
-        (mark-unequal (not (eq cody--last-mark (or (mark) (point))))))
-    (if point-unequal
-        (setq cody--last-point (point)))
-    (if mark-unequal
-        (setq cody--last-mark (or (mark) (point))))
-    (if (or point-unequal mark-unequal)
-        (cody--handle-focus-change point-unequal))))
-
-(defun cody--handle-focus-change (cursor-moved-p)
+(defun cody--handle-focus-changed (cursor-moved-p)
   "Notify agent that cursor or selection has changed in current buffer.
 If CURSOR-MOVED-P then we may also trigger a completion timer."
   ;; Does not send the file contents. You can leave it undefined when
@@ -580,14 +578,17 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
     ;; Maybe set a timer to trigger an automatic completion.
     ;; Do some trivial rejects here before setting the timer.
     (when (and cursor-moved-p
-               (cody--buffer-active-p)
-               (not (cody--overlay-visible-p)))
-      (cody--start-completion-timer))))
+               (cody--buffer-active-p))
+      (if (cody--overlay-visible-p)
+          (cody--hide-completion)
+        (cody--start-completion-timer)))))
 
 (defun cody--start-completion-timer ()
   "Set a cancellable timer to check for an automatic completion."
+  ;; This is a debounce so we don't request one until they stop typing.
+  ;; It requests immediately after they go idle.
   (setq cody--completion-timer
-        (run-with-idle-timer 0 nil #'cody--maybe-trigger-completion)))
+        (run-with-idle-timer 0.1 nil #'cody--maybe-trigger-completion)))
 
 (defun cody--cancel-completion-timer ()
   "Cancel any pending timer to check for automatic completions."
@@ -614,10 +615,66 @@ The return value is appropiate for sending directly to the rpc layer."
              (end-pos (pos-parameters end)))
         (list :start beg-pos :end end-pos)))))
 
+(defun cody--handle-typing-while-suggesting (beg end len)
+  "Either recompute completion or dispel it, depending on the change.
+This can be called for either insertions or deletions, and we allow
+the completion suggestion overlay to remain active for certain instances
+of both. If it is a deletion, we recorded the deleted text in our
+before-change function.
+BEG and END are the region that changed, and LEN is its length."
+  (condition-case err
+      (if-let*
+          ;; TODO: We ought to get typing the completion prefix working,
+          ;; as it works in other clients. But our zero-width overlays
+          ;; are making it a very slippery problem that needs revisiting.
+          ((enable-this-code-branch nil) ; t to turn back on
+          ;; Make sure there's a suggestion at the end of the change.
+           (ovl (cody--overlay-delta-at end))
+           (suggested-text (overlay-get ovl 'after-string))
+           ;; BEG and END are as per contract of `after-change-functions'.
+           (inserted-text (buffer-substring beg end)) ; "" for deletions
+           (ignored (or
+                     ;; inserted text exactly matches the front of what's
+                     ;; left of the suggestion string at point, or,
+                     (and (zerop len)
+                          (string-prefix-p inserted-text suggested-text))
+                     ;; user deleted only spaces and tabs on the current line,
+                     (and (plusp len) ; deletion (len is num chars deleted)
+                          (string-match "^[ \t]*$"
+                                        (get 'cody--vars 'deleted-text))))))
+          (progn
+            ;; This should recompute the necessary deltas.
+            (cody--hide-completion)
+            (cody--display-completion))
+        ;; All other buffer changes make the overlay go away.
+        (cody--hide-completion))
+    (error (cody--log "Error in after-change function: %s" err))))
+
+(defun cody--next-overlay-delta (beg)
+  "Return the next overlay delta at or after BEG on the current line.
+Returns nil if it finds any non-whitespace characters before finding
+the Cody overlay, as that is a case which I think does not occur."
+  (ignore-errors
+    (cl-loop for pos = beg then (next-overlay-change pos)
+             while (<= pos (cody--eol))
+             if (string-match-p "^[ \t]*$"
+                                (buffer-substring-no-properties beg pos))
+             for o = (cody--overlay-delta-at pos)
+             when o return o)))
+
+(defun cody--overlay-delta-at (pos)
+  "Return the Cody delta overlay at POS, if any."
+  ;; Searching the overlays at POS is fraught with weird emacs bugs.
+  (cl-find-if (lambda (ovl) ; Instead, search our own overlay list.
+                (and (overlay-get ovl 'after-string) ; not e.g. logo ovl
+                     (= pos (overlay-start ovl))))
+              cody--overlay-deltas))
+
 ;; See https://www.gnu.org/software/emacs/manual/html_node/elisp/JSONRPC-Overview.html
 ;; for a description of the parameters for this jsonrpc notification callback.
 (defun cody--handle-agent-notification (_ method params)
-  "Handle notifications from the agent, e.g. shutdown."
+  "Handle notifications from the agent, e.g. shutdown.
+Optional argument METHOD is the agent protocol method with PARAMS."
   (cl-case method
     (chat/updateMessageInProgress
      (cody--handle-chat-update params))
@@ -626,15 +683,16 @@ The return value is appropiate for sending directly to the rpc layer."
 
 (defun cody--kill-buffer-function ()
   "If we are killing the last buffer visiting this file, notify agent."
-  (let ((bufname buffer-file-name))
-    (condition-case err
-        (when (and cody-mode
-                   bufname
-                   (cody--last-buffer-for-file-p))
-          (jsonrpc-notify (cody--connection) 'textDocument/didClose
-                          (list :filePath bufname))
-          (cody--log "Notified agent closed %s" bufname))
-      (error "Error notifying agent closing %s" bufname))))
+  (condition-case err
+      (when (and cody-mode
+                 buffer-file-name
+                 (cody--last-buffer-for-file-p))
+        (jsonrpc-notify (cody--connection) 'textDocument/didClose
+                        (list :filePath buffer-file-name)))
+    (error (cody--log "Error notifying agent closing %s: err"
+                      buffer-file-name err))
+    (:success (cody--log "Notified agent closed %s" buffer-file-name))))
+
 
 (defun cody--last-buffer-for-file-p ()
   "Check if the current buffer is the last one visiting its file.
@@ -648,7 +706,8 @@ visiting its associated file."
                   (buffer-list)))))
 
 (defun cody--handle-chat-update (params)
-  "Handler for `chat/updateMessageInProgress'."
+  "Handler for `chat/updateMessageInProgress'.
+Argument PARAMS is the chat response object."
   (if cody--typewriter-effect
       (progn
         (message nil)
@@ -715,7 +774,6 @@ Cody chat buffer should be current, and PARAMS non-nil."
     (with-current-buffer buf
       (when cody-mode
         (cody--minor-mode-shutdown))))
-  (remove-hook 'find-file-hook #'cody--maybe-turn-on-cody-mode)
   (when (cody--alive-p)
     (ignore-errors
       (cody--request 'shutdown)) ; Required by the protocol
@@ -778,7 +836,7 @@ there is a connection."
     (message "Cody connection initialized.")))
 
 (defun cody-restart ()
-  "Shut down and restart Cody. Mostly for debugging."
+  "Shut down and restart Cody.  Mostly for debugging."
   (interactive)
   (let ((cody--node-version-status 'good))
     (ignore-errors
@@ -833,22 +891,23 @@ Query and output go into the *cody-chat* buffer."
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (when-let ((o (car-safe cody--overlay-deltas)))
-    (and (overlayp o)
-         (overlay-buffer o) ; overlay is positioned somewhere
-         (cody--cc))))
+  (when cody-mode
+    (when-let ((o (car-safe cody--overlay-deltas)))
+      (and (overlayp o)
+           (overlay-buffer o) ; overlay is positioned/visible somewhere
+           (cody--cc))))) ; not a zombie
 
 (defun cody--make-overlay (text pos)
   "Create a new overlay for displaying part of a completion suggestion.
 Gives it TEXT as the `after-string' and sets it at POS.
 Pushes the new overlay onto the front of `cody--overlay-deltas'."
   (save-excursion
-    (let ((o (make-overlay pos pos nil nil t)))
+    ;; No front/rear advance - the overlay should never be nonempty.
+    (let ((o (make-overlay pos pos)))
       (overlay-put o 'cody t)
       (overlay-put o 'keymap cody-completion-map)
       (overlay-put o 'priority '(nil . 50))
       (overlay-put o 'help-echo "TAB to accept")
-      (overlay-put o 'insert-in-front-hooks '(cody--overlay-insert-front))
       (cody--overlay-set-text o text)
       (push o cody--overlay-deltas)
       o)))
@@ -866,9 +925,9 @@ Pushes the new overlay onto the front of `cody--overlay-deltas'."
 (defun cody--point-at-overlay-p (&optional fuzzy)
   "Return the cody completion fragment overlay at point, if any.
 If FUZZY is non-nil, returns the overlay if there is only whitespace
-between point and the start of the completion. Returns nil if point
+between point and the start of the completion.  Returns nil if point
 is not currently at the start of a completion suggestion delta."
-  (when (and cody-mode (cody--overlay-visible-p))
+  (when (cody--overlay-visible-p)
     (cl-loop for o in cody--overlay-deltas
              when (or (and fuzzy
                            (>= (overlay-start o) (point))
@@ -909,7 +968,7 @@ and the start of the overlay."
   (when (and cody-mode
              cody-enable-automatic-completions
              (not (cody--overlay-visible-p))
-             (not mark-active)
+             (not (use-region-p))
              (cody--completion-syntactically-eligible-p))
     (cody-request-completion)))
 
@@ -928,7 +987,7 @@ and the start of the overlay."
 Does syntactic smoke screens before requesting completion from Agent."
   (not (or
         ;; user is in the middle of a word (from jetbrains cody client)
-        (looking-back "\\s*[A-Za-z]+" (line-beginning-position))
+        (looking-back "\\s*[A-Za-z]+" (cody--bol))
         ;; suffix of the current line contains any word characters
         (looking-at ".*\\w.*"))))
 
@@ -987,12 +1046,12 @@ KIND specifies whether this was requested manually or automatically"
             (setq cody--completion (cody--populate-from-response response)))
           (cody--update-completion-timestamp :displayedAt)
           (condition-case err
-              (cody--display-completion 0)
+              (cody--display-completion)
             (error
              (cody--log "Error displaying completion: %s" err)))))))))
 
 (defun cody--populate-from-response (response)
-  "Parse RESPONSE and return a populated `cody-completion' object."
+  "Parse RESPONSE and return a populated variable `cody-completion' object."
   (make-instance
    'cody-completion
    :items (vconcat
@@ -1004,13 +1063,9 @@ KIND specifies whether this was requested manually or automatically"
    :response response
    :completionEvent (plist-get response :completionEvent)))
 
-(defsubst cody--key-for-command (command &optional keymap)
-  "Get user-visible key sequence for COMMAND."
-  (when-let ((keys (where-is-internal command keymap)))
-    (key-description (car keys))))
-
 (defun cody--position-to-point (pos)
-  "Convert Cody Agent line/char position to a buffer position."
+  "Convert Cody Agent line/char position to a buffer position.
+Argument POS is a plist with the line and char."
   (save-excursion
     (goto-char (point-min))
     (forward-line (plist-get pos :line))
@@ -1027,58 +1082,37 @@ Converts from line/char to buffer positions."
 Converts from line/char to buffer positions."
   (cody--position-to-point (plist-get range :end)))
 
-(defun cody--display-completion (index)
+(defun cody--display-completion ()
   "Show the server's code autocompletion suggestion.
-RESPONSE is the entire jsonrpc response.
-INDEX is the completion alternative to display from RESPONSE."
+RESPONSE is the entire jsonrpc response."
   (when-let*
       ((cc (cody--cc))
        (item (cody--current-item cc))
+       (index (cody--current-item-index cc))
        (range (cody--completion-item-range item))
        (range-start (cody--range-start range))
-       (original-text (buffer-substring-no-properties
-                       range-start (cody--range-end range)))
-       (insert-text (let ((text (cody--completion-text cc)))
-                      (cond
-                       ((null text) nil)
-                       ((string-match-p "[[:graph:]]" text) text)
-                       ;; Bail if suggestion is all-whitespace; the team
-                       ;; says this is a bug.  If it repros reliably,
-                       ;; they have asked that you let them know.
-                       (t (error "Completion text is blank: %s" text)))))
-       (lines (split-string insert-text "\r?\n"))
-       ;; We treat the 1st line specially: the completion may rewrite it.
-       (insert-text-1st-line (car-safe lines))
-       ;; We treat the 2nd and following lines as a single unit of text.
-       (multiline-insert-text (mapconcat #'identity (cdr lines) "\n"))
+       (buffer-text (buffer-substring-no-properties
+                     range-start (cody--range-end range)))
+       (insert-text-chunks (cody--construct-line-chunks))
+       (first-line (car insert-text-chunks))
+       (next-lines (cdr insert-text-chunks))
        ;; Skip completions that need to delete or change characters in the
        ;; existing document. Harder to support, and most clients don't.
-       (only-inserts
-        (cl-loop for chunk in (cody-diff-strings original-text
-                                                 insert-text-1st-line)
-                 never (eq (car-safe chunk) '-)))
-       ;; Run Myers diff between the existing text in the document and the
-       ;; first line of the `insertText` that is returned from the agent.
-       ;; The diff algorithm returns a list of "deltas" that give us the
-       ;; minimal number of additions we need to make to the buffer text.
-       ;; Insertions are a list of the form '((buffer-pos . text) ...)
-       (inserts (cody-diff-strings-with-positions original-text
-                                                  insert-text-1st-line
-                                                  range-start)))
-    ;; TODO: log completion suggested with item's id
+       (only-inserts-p (cody--check-only-insertions buffer-text first-line))
+       (insertions (cody--compute-diff-deltas buffer-text
+                                              first-line
+                                              range-start)))
+    ;; TODO: log completion suggested with id of suggested item.
     (condition-case err
         ;; Add one overlay span per delta in the first line.
         (cl-loop
-         for (pos . text) in inserts
-         for rest = (when (> (length multiline-insert-text) 0)
-                      multiline-insert-text)
+         for (pos . text) in insertions
          do (cody--make-overlay text pos)
          finally do
-         ;; Add Cody marker to the end of the first line.
          (cody--add-completion-marker (car-safe (last cody--overlay-deltas)))
          ;; Insert following lines, if any, as a single block.
-         (when rest (cody--make-overlay rest pos))
-         (setf (cody--current-item-index cc) index)
+         (when (and next-lines (cl-plusp (length next-lines)))
+           (cody--make-overlay next-lines pos))
          (when (and cody-enable-completion-cycling-help
                     (cody--multiple-items-p cc))
            (message "Showing suggestion %s of %s (%s/%s to cycle)"
@@ -1090,54 +1124,90 @@ INDEX is the completion alternative to display from RESPONSE."
        (cody--log "Error setting completion text: %s" err)
        (cody--hide-completion)))))
 
+(defun cody--construct-line-chunks ()
+  "Split suggestion into first and remaining lines.
+Returns (FIRST . REST) as strings."
+  (let* ((insert-text (cody--get-insert-text-for-display))
+         ;; We treat the 1st line specially: the completion may rewrite it.
+         ;; So it gets a separate text chunk for the caller.
+         (lines (split-string insert-text "\r?\n"))
+         (multiline-p (> (length lines) 1))
+         (first-line (car lines))
+         ;; We treat any 2nd and following lines as a single unit of text.
+         (more-lines
+          (if multiline-p
+              (concat "\n" (mapconcat #'identity (cdr lines) "\n"))
+            "")))
+    (cons first-line more-lines)))
+
+(defun cody--get-insert-text-for-display ()
+  "Return the suggested text for the current completion.
+Returns nil if the text does not pass the sanitizing checks."
+  (let ((text (cody--completion-text (cody--cc))))
+    (cond
+     ((null text) nil)
+     ((string-match-p "[[:graph:]]" text) ; contains non-whitespace
+      ;; Check if it is just giving us the code that's already there.
+      ;; Can happen with any model, even fitm-trained.
+      (if (string= text
+                   (buffer-substring-no-properties (point) (length text)))
+          nil
+        text)) ; Otherwise, looks legit.
+     ;; Bail if suggestion is all-whitespace; the team says this is a
+     ;; bug.  If it repros reliably, they have asked that you let them know.
+     (t
+      (error "Completion text is blank: %s" text)))))
+
 (defun cody--add-completion-marker (ovl)
   "Put a Cody symbol at the end of overlay OVL."
+  (when (and cody-display-completion-marker
+             (overlayp ovl))
+    (condition-case err
+        (let* ((text (or (overlay-get ovl 'after-string) ""))
+               (ends-in-newline (string-match-p "\n\\'" text))
+               (marker (propertize " " 'display (cody-logo-small)))
+               ;; Make sure it precedes any trailing \n, to stay on line.
+               (text-with-marker (if ends-in-newline
+                                     (concat (substring text 0 -1) marker "\n")
+                                   (concat text marker))))
+          (overlay-put ovl 'after-string text-with-marker))
+      (error (cody--log "Error adding completion marker: %s" err)))))
+
+(defun cody--check-only-insertions (buffer-text first-line)
+  "Return non-nil if the diffs contain only insertions.
+BUFFER-TEXT and FIRST-LINE are the strings to diff."
   (condition-case err
-      (when (and t (overlayp ovl))
-        (overlay-put ovl 'after-string
-                     (concat (or (overlay-get ovl 'after-string) "")
-                             (propertize " " 'display (cody-logo-small)))))
-    (error (cody--log "Error showing completion marker: %s" err))))
+      (cl-loop for chunk in (cody-diff-strings buffer-text first-line)
+               never (eq (car-safe chunk) '-))
+    (error
+     (cody--log "Error chunking completion: %s" err)
+     nil)))
 
-(defun cody--overlay-insert-front (ovl after-p beg _end &optional len)
-  "Allow user to type over the overlay character by character."
-  (when (and after-p
-             (cody--overlay-visible-p)
-             (numberp len)
-             (zerop len)) ; Length 0 means it is an insertion.
-    (when-let ((text (cody--overlay-get-text ovl))
-               (first (string-to-char text))
-               (typed (char-after beg))) ; char they just typed
-      (cond
-       ;; TODO: Handle backspace.
-       ((/= first typed) ; typed something different
-        ;; Allow them to type whitespace and push the suggestion over
-        (unless (eq (char-syntax typed) ?\s)
-          (cody--hide-completion))) ; hide if not whitespace
-       ((= 1 (length text))
-        (cody--accept-completion)) ; fully consumed
-       (t
-        (cody--shorten-completion ovl))))))
-
-(defun cody--shorten-completion (overlay)
-  "Consume the first character of the current completion.
-OVERLAY is the relevant completion fragment."
-  (cody--overlay-set-text overlay
-                          (substring
-                           (cody--overlay-get-text overlay) 1)))
+(defun cody--compute-diff-deltas (buffer-text first-line range-start)
+  "Diff completion against first line and compute deltas.
+BUFFER-TEXT is the text being replaced by the suggested completion.
+FIRST-LINE is the first line of the suggested completion.
+RANGE-START is the start buffer position of the text being replaced."
+  ;; Run Myers diff between the existing text in the document and the
+  ;; first line of the `insertText` that is returned from the agent.
+  ;; The diff algorithm returns a list of "deltas" that give us the
+  ;; minimal number of additions we need to make to the buffer text.
+  ;; Insertions are a list of the form '((buffer-pos . text) ...)
+  (condition-case err
+      (cody-diff-strings-with-positions buffer-text
+                                        first-line
+                                        range-start)
+    (error
+     (cody--log "Error computing diff deltas: %s" err))))
 
 (defun cody--hide-completion ()
-  "Stop showing the completion suggestion."
+  "Stop showing the current completion suggestion overlays.
+`cody--completion' is left alone; use `cody--discard-completion' to
+remove all traces of the last code completion response."
   (mapc #'delete-overlay cody--overlay-deltas)
   (setq cody--overlay-deltas nil)
   (when cody--completion
     (setf (cody--current-item-index (cody--cc)) 0)))
-
-(defun cody--maybe-clear-completion ()
-  "Implements `post-command-hook' to clear completion if applicable."
-  ;; For now, clear it if we're no longer at or before overlay start.
-  (unless (cody--point-at-overlay-p 'fuzzy)
-    (cody--hide-completion)))
 
 (defun cody--graphql-log-event (event)
   "Send a `telemetry/recordEvent' to the agent.
@@ -1149,6 +1219,7 @@ EVENT is a Sourcegraph GraphQL event."
     (error (cody--log "Error logging graphql event: %s" err))))
 
 (defun cody--accept-completion ()
+  "Accept and discard the completion, and notify server."
   (let* ((cc (cody--cc))
          (item (cody--current-item cc))
          (text (cody--completion-item-original-text item))
@@ -1176,9 +1247,8 @@ Sends telemetry notifications when telemetry is enabled."
         cody--completion-timestamps nil
         ;; Just to be clear, don't change this or the completion will resurrect.
         cody--last-completion-trigger-spot cody--last-completion-trigger-spot
-        cody--last-point nil
-        cody--last-mark nil
-        cody--update-debounce-timer nil))
+        cody--update-debounce-timer nil)
+  (setplist 'cody--vars nil))
 
 (defun cody--key-msg-for-command (command)
   "Return message about the key to press for a given COMMAND."
@@ -1187,9 +1257,8 @@ Sends telemetry notifications when telemetry is enabled."
     "No key is bound to accept"))
 
 (defun cody--check-cycle-preconditions ()
-  "Return non-nil if we fail the preconditions for cycling.
-Returns nil if we meet all the preconditions. If not, then it
-handles logging and messaging."
+  "Return non-nil if we meet all the preconditions for cycling.
+If not, then it handles logging and messaging."
   (let ((verbose (or cody-enable-completion-cycling-help
                      (and (called-interactively-p 'interactive)
                           (memq this-command
@@ -1199,37 +1268,39 @@ handles logging and messaging."
                   (let ((output (apply #'message msg args)))
                     (if verbose (message output)
                       (cody--log output))
-                    'fail))) ; return non-nil to signal failed check
+                    nil))) ; return nil to signal failed check
       (cond
        ((not cody-enable-completion-cycling)
         (explain "Set `cody-enable-completion-cycling' to enable cycling."))
-       ((not (and (cody--cc) (cody--current-item (cody--cc))))
+       ((not (and cc (cody--current-item cc)))
         (explain "No completion here"))
        ((not (cody--multiple-items-p cc))
         (explain "No other suggestions; %s"
                  (cody--key-msg-for-command 'cody--tab-key)))
-       ;; Disallow cycling if they have typed into the completion prefix.
-       ((not (string= (cody--completion-display-text cc)
-                      (cody--completion-original-text cc)))
-        (explain "Cycling currently unavailable."))
-       (t nil))))) ; cycling is available
+       (t 'success))))) ; cycling is not available
 
 (defun cody--cycle-completion (direction)
   "Cycle through the completion items in the specified DIRECTION.
 DIRECTION should be 1 for next, and -1 for previous."
-  (unless (cody--check-cycle-preconditions)
-    (if-let* ((cc (cody--cc))
-              (items (cody--completion-items cc))
-              (index (cody--current-item-index cc))
-              (num (cody--num-items cc))
-              (next (% (+ index direction num) num)))
-        (condition-case err
-            (cody--display-completion next)
-          (error
-           (cody--log "Error displaying completion: %s \ncompletion: %s" err cc)))
-      (when cody-enable-completion-cycling-help
-        (message "Error cycling through completions"))
-      (cody--log "Error cycling through completions: items= %s" items))))
+  (if (cody--check-cycle-preconditions)
+      (if-let* (
+                (cc (cody--cc))
+                (items (cody--completion-items cc))
+                (index (cody--current-item-index cc))
+                (num (cody--num-items cc))
+                (next (% (+ index direction num) num)))
+          (condition-case err
+              (progn
+                (cody--hide-completion) ; This sets index to 0.
+                (setf (cody--current-item-index cc) next) ; Set index to new val.
+                (cody--display-completion))
+            (error
+             (cody--log "Error displaying completion: %s \ncompletion: %s" err cc)))
+        (when cody-enable-completion-cycling-help
+          (message "Error cycling through completions"))
+        (cody--log "Error cycling through completions: items= %s" items))
+    (when cody-enable-completion-cycling-help
+      (message "No more suggestions. TAB to accept."))))
 
 (defun cody-next-completion ()
   "Move to the next completion alternative."
@@ -1293,7 +1364,7 @@ DIRECTION should be 1 for next, and -1 for previous."
    (t 'hidden)))
 
 (defun cody--anonymized-uuid ()
-  "Return, generating if needed, `cody--anonymized-uuid'."
+  "Return, generating if needed, variable `cody--anonymized-uuid'."
   (or cody--anonymized-uuid
       (setq cody--anonymized-uuid (uuidgen-4))
       (custom-save-all)
@@ -1313,6 +1384,7 @@ DIRECTION should be 1 for next, and -1 for previous."
         (error (cody--log "Telemetry error in completion:accepted: %s" err))))))
 
 (defun cody--telemetry-completion-suggested ()
+  "TODO: This needs to be rewritten asap for the new protocol."
   (when cody-enable-telemetry
     (when-let* ((cc (cody--cc))
                 (latency (max (- (cody--completion-timestamp :displayedAt)
@@ -1362,33 +1434,6 @@ Both parameters are plists representing json objects."
      :publicArgument params
      :client "EMACS_CODY_EXTENSION"
      :deviceID uuid)))
-
-;;; Utilities
-
-(defun cody--edebug-inspect (obj)
-  "Pretty-print OBJ, one of our EIEIO objects while debugging.
-It pops the pretty-printed object tree into a separate buffer.
-Invoke this while debugging from an *edebug* buffer, e.g. with:
-
-  (cody--edebug-inspect (cody--cc))
-
-to see the current completion response object in detail.
-"
-  (let ((buf (get-buffer-create "*Edebug Object Dump*")))
-    (with-current-buffer buf
-      (erase-buffer)
-      (insert (pp-to-string
-               (mapcar (lambda (slot)
-                         (cons (eieio-slot-descriptor-name slot)
-                               (eieio-oref obj (eieio-slot-descriptor-name slot))))
-                       (eieio-class-slots (eieio-object-class obj))))))
-    (pop-to-buffer buf)))
-
-(defun cody--buffer-active-p (&optional buf)
-  "Return non-nil if BUF is active. BUF defaults to the current buffer."
-  (let ((buffer (or buf (current-buffer))))
-    (and (eq buffer (window-buffer (selected-window)))
-         (get-buffer-window buffer t))))
 
 (provide 'cody)
 ;;; cody.el ends here

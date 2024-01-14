@@ -22,13 +22,14 @@
 (defmacro cody--node-version-test (&rest body)
   "Helper for testing `cody--check-node-version'.
 The tests should set `test-version' to a node version string."
-  ;; I had to brute-force this, so that the test runs even if you
-  ;; have started Cody. I was unable to let-bind `shell-command-to-string'
-  ;; (e.g. with cl-flet) and have it take effect in the test, though it
-  ;; works in the *scratch* buffer. Similarly, Cody was overriding the
-  ;; dynamic let-binding of `cody--node-version-status', and both these
-  ;; issues would cause the test to fail. So I had to replace the symbol
-  ;; definitions, and then put them back after the test.
+  ;; I had to brute-force this, so that the test runs even if you have
+  ;; started Cody, even if it has since shut down. I was unable to
+  ;; let-bind `shell-command-to-string' (e.g. with `cl-flet') and have it
+  ;; take effect in the test, though it works in the *scratch*
+  ;; buffer. Similarly, Cody was overriding the dynamic let-binding of
+  ;; `cody--node-version-status', and both these issues would cause the
+  ;; test to fail. So I had to replace the symbol definitions, and then
+  ;; put them back after the test.
   (declare (indent defun) (debug body))
   `(let ((old-shell-command-fn (symbol-function 'shell-command-to-string))
          (old-node-version-status cody--node-version-status)

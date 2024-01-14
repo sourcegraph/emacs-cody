@@ -72,10 +72,9 @@ this function returns nil."
                 (_ (cl-incf pos))) ; Handle unchanged characters
            finally return (nreverse inserts)))
 
-;; Implementation courtesy of Michael Bauer <michael-bauer@posteo.de>,
-;; http://perma-curious.eu/post-elisp-diff/, who has given his permission
-;; to use it.
-
+;; Implementation courtesy of Michael Bauer <perma-curious@posteo.de>,
+;; http://perma-curious.eu/post-elisp-diff/, who has graciously given his 
+;; permission to use it.
 (defun cody--diff-worker (a b)
   "Diff A and B.
 Recursively computes the longest common subsequence and while
