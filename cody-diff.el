@@ -14,7 +14,7 @@
 
 (eval-when-compile (require 'cl-lib))
 
-(defvar cody--list-diff-cache (make-hash-table :test 'equal)
+(defvar cody--list-diff-cache (make-hash-table :test 'eq)
   "Memoization cache for `cody--list-diff'.")
 
 (defun cody-diff-lists (a b)
@@ -64,7 +64,7 @@ count the buffer position for each patch chunk.
 
 If any element of the passed PATCH is a deletion such as `(- A B)',
 this function returns nil."
-   (cl-loop with pos = start-pos
+  (cl-loop with pos = start-pos
            and inserts = nil
            for chunk in patch
            do (pcase chunk
@@ -83,33 +83,33 @@ this function returns nil."
   "Diff A and B.
 Recursively computes the longest common subsequence and while
 doing so assembles the returned diff."
-    ;; f:first r:rest
-    (with-memoization (gethash (cons a b) cody--list-diff-cache)
-      (cl-labels
-          ((choose (a b)
-             ;; choose diff with longer lcs
-             (let ((la (seq-count #'atom a))
-                   (lb (seq-count #'atom b)))
-               (if (> la lb) a b)))
-           (merge (x)
-             ;; merge consecutive add or rem
-             (pcase x
-               (`((,op ,f) (,op . ,r) . ,d)
-                `((,op ,f . ,r) . ,d))
-               (d d))))
-        (cond
-         ((and a b)
-          (pcase-let ((`(,af . ,ar) a)
-                      (`(,bf . ,br) b))
-            (if (equal af bf)
-                ;; same
-                (cons af (cody--diff-worker ar br))
-              ;; different
-              (merge (choose (cons (list '+ bf) (cody--diff-worker a br))
-                             (cons (list '- af) (cody--diff-worker ar b)))))))
-         ;; rest
-         (a `((- . ,a)))
-         (b `((+ . ,b)))))))
+  ;; f:first r:rest
+  (with-memoization (gethash (cons a b) cody--list-diff-cache)
+    (cl-labels
+        ((choose (a b)
+           ;; choose diff with longer lcs
+           (let ((la (seq-count #'atom a))
+                 (lb (seq-count #'atom b)))
+             (if (> la lb) a b)))
+         (merge (x)
+           ;; merge consecutive add or rem
+           (pcase x
+             (`((,op ,f) (,op . ,r) . ,d)
+              `((,op ,f . ,r) . ,d))
+             (d d))))
+      (cond
+       ((and a b)
+        (pcase-let ((`(,af . ,ar) a)
+                    (`(,bf . ,br) b))
+          (if (equal af bf)
+              ;; same
+              (cons af (cody--diff-worker ar br))
+            ;; different
+            (merge (choose (cons (list '+ bf) (cody--diff-worker a br))
+                           (cons (list '- af) (cody--diff-worker ar b)))))))
+       ;; rest
+       (a `((- . ,a)))
+       (b `((+ . ,b)))))))
 
 
 (provide 'cody-diff)

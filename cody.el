@@ -15,7 +15,7 @@
 ;; Add something like `(add-hook 'prog-mode-hook 'cody-mode)' to start
 ;; cody automatically in new code buffers after logging into Cody.
 ;;
-;; `M-x cody-login' to start using Cody.
+;; `M-x cody-login` to start using Cody.
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
