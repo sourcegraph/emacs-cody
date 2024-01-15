@@ -1,4 +1,4 @@
-;;; cody-tests.el --- tests for Emacs-Cody
+;;; cody-tests.el --- Tests for Emacs-Cody -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 Sourcegraph, Inc.
 
@@ -13,11 +13,14 @@
 ;; To run them, first `M-x eval-buffer' to load the test definitions,
 ;; then `ert-run-tests-interactively RET RET' to run them.
 
-(require 'cody)
-(require 'cody-diff)
-(require 'ert)
+;;; Code:
+
 (eval-when-compile
   (require 'cl-lib))
+(require 'ert)
+(require 'cody)
+
+;;; System checks
 
 (defmacro cody--node-version-test (&rest body)
   "Helper for testing `cody--check-node-version'.
@@ -65,6 +68,136 @@ The tests should set `test-version' to a node version string."
     (setq test-version "v21.1.0")
     (set 'cody--node-version-status nil)
     (should (cody--check-node-version))))
+
+;;; Completions tests
+
+(defmacro cody--mock-completion-response (items)
+  "Generate a custom mock completion jsonrpc response object.
+
+You must specify one or more items in ITEMS, the list of
+completion suggestions. Each spec in ITEMS has 4 elements:
+
+  (id text range-beg range-end)
+
+ID is a unique message ID, and TEXT is the suggested
+replacement, which can be a multi-line string.
+RANGE-BEG and RANGE-END are buffer positions of the text to
+replace with this completion suggestion upon acceptance.
+
+The response object returned by the jsonrpc call is a plist:
+
+  (:items (item-list) :completionEvent (event-params))
+
+Currently you can only configure the `:completionEvent'
+object by manipulating the returned tree manually."
+  `(cl-labels 
+    ((convert-pos (pos)
+       "Convert a 1-based buffer position to a 0-based line/character position."
+       (let ((line (1- (line-number-at-pos pos)))
+             (char (1- (save-excursion (goto-char pos) (current-column)))))
+         `(:line ,line :character ,char)))
+     (count-lines-and-chars (text)
+       "Count the lines and characters in the completion text."
+       (let ((lines (1+ (count-matches "\n" nil nil text)))
+             (chars (length text)))
+         `(:lineCount ,lines :charCount ,chars :stopReason "stop"
+           :lineTruncatedCount 0 :truncatedWith "indentation"))))
+    (let ((items-vector (cl-loop for (id text range-beg range-end) in ,items
+                                 vconcat `(( :id ,id
+                                             :insertText ,text
+                                             :range ( :start ,(convert-pos range-beg)
+                                                      :end ,(convert-pos range-end))))))
+          (event-items (cl-loop for (_ text _ _) in ,items
+                                vconcat (list (count-lines-and-chars text)))))
+      `(:items ,items-vector
+        :completionEvent ( :id "test-completion-hash-id"
+                           :params ( :multiline t
+                                     :triggerKind "Manual"
+                                     :providerIdentifier "fireworks"
+                                     :providerModel "starcoder-hybrid"
+                                     :languageId "typescript"
+                                     :artificialDelay 0
+                                     :multilineMode "block"
+                                     :id "3948fdc3-317b-48d1-be79-734628c94e94"
+                                     :contextSummary 
+                                     ( :strategy "jaccard-similarity"
+                                       :duration 21.32
+                                       :totalChars 
+                                       ,(apply '+ (mapcar (lambda (item) 
+                                                            (plist-get item :charCount)) 
+                                                          event-items))
+                                       retrieverStats nil)
+                                     :source "Network")
+                           :startedAt 2149
+                           :items ,event-items
+                           :loggedPartialAcceptedLength 0)))))
+
+(defvar cody--tests-sample-completion-response-1
+  (list
+   (list "1" "Call me Ishmael" 500 505)
+   (list "2" "Hear Me, Oh Muse" 500 505)
+   (list "3" "Rosebud" 500 505))
+  "3 single-line suggestions included")
+
+(defun cody--test-whitespace-before-caret (str caret-pos)
+  "Return the whitespace before the first caret in STR.
+Returns ws up to the beginning of the line, given CARET-POS."
+  (let ((start-pos (string-match "\\(^\\|[^[:space:]]\\)[[:space:]]*$"
+                                 str 0 caret-pos)))
+    (if start-pos
+        (substring str start-pos caret-pos)
+      "")))
+
+(defun cody--test-set-up-caret-test (test-spec)
+  "Set up test parameters given a DSL in TEST-SPEC.
+
+Currently the DSL has only one element, the ^, which
+is removed in the result, and that position is returned
+as the point at which the completion is requested.
+
+Return value is (updated-text . caret-position)."
+  (let* ((caret (or (string-match "\\^" test-spec)
+                    (error "No ^ character found in test-spec")))
+         (text (concat (substring test-spec 0 caret)
+                       (substring test-spec (1+ caret)))))
+    (cons text caret)))
+
+(ert-deftest cody-test-single-line-completion ()
+  "Run checks for a single-line completion response."
+  ;; TODO: Make a new macro to reduce the boilerplate below.
+  (let* ((pretext "// file hello.c
+#include <stdio.h>
+int main() {
+   ^   
+   return 0;
+}
+")
+         (params (cody--test-set-up-caret-test pretext))
+         (insert-text (car params))
+         (pos (cdr params))
+         (cody--unit-testing-p t)) ; don't talk to real agent
+    (with-temp-buffer
+      (erase-buffer)
+      (insert insert-text)
+      (goto-char pos)
+      (cody-mode)
+      (let ((response (cody--mock-completion-response
+                       `(("id-1" "printf(\"Hello, world!\");" ,pos ,pos)))))
+        ;; Make sure cody-mode starts up without failing.
+        (should cody-mode)
+        ;; Should pass if the response looks good.
+        (when nil ; This test is -almost- working!
+          (should (cody--handle-completion-result
+                   response (current-buffer) pos "Automatic"))
+          ;; Check that the event is dropped if the point was moved.
+          (should-not (cody--handle-completion-result
+                       response
+                       (current-buffer)
+                       (- pos 2) ; point has moved 2 spaces ahead of request
+                       "Invoke"))) ; or Automatic
+        ;; It should error if items is not a vector.
+        (should 'finish-this-test)))))
+         
 
 (ert-deftest cody-test-diff-lists ()
   "Tests for `cody-diff-lists' Myers-diff functionality."

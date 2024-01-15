@@ -6,11 +6,13 @@
 ;; URL: https://github.com/sourcegraph/emacs-cody
 
 ;;; Commentary:
-;; This provides a very quick-and-dirty list differ. It is intended
+;; This provides a very quick-and-dirty list differ.  It is intended
 ;; only for diffing within relatively short single sequences of under a
 ;; few hundred characters, for code autocompletion use cases.
 
-(require 'cl-lib)
+;;; Code:
+
+(eval-when-compile (require 'cl-lib))
 
 (defvar cody--list-diff-cache (make-hash-table :test 'equal)
   "Memoization cache for `cody--list-diff'.")
@@ -33,9 +35,11 @@ strings as the atoms in the patch."
 
 (defun cody-diff-strings-with-positions (a b start-pos)
   "Postprocesses the `cody-diff-strings' output for display.
+A is the buffer string at START-POS being compared with B.
 Removes all unchanged characters, and prepends the buffer position
-to each diff chunk. Return values are for the form `(POS . STRING)'.
-Returns nil if there are any deletions in the diff."
+to each diff chunk.  Return value is a list whose elements represent
+insertions of the form `(POS . STRING)'.
+Returns nil if there are any deletions or overwrites in the diff."
   (cody--diff-get-patch-insertions (cody-diff-strings a b)
                                    start-pos))
 
@@ -43,7 +47,7 @@ Returns nil if there are any deletions in the diff."
   "Convert PATCH, a list of patch chunks, into position-based inserts.
 
 START-POS is the buffer position corresponding to the beginning of the
-code rewrites for the line, and may be at the beginning of the current 
+code rewrites for the line, and may be at the beginning of the current
 line, before point, but not before `line-beginning-position'.
 
 The Myers diff algorithm returns patches that take the form of a
@@ -73,7 +77,7 @@ this function returns nil."
            finally return (nreverse inserts)))
 
 ;; Implementation courtesy of Michael Bauer <perma-curious@posteo.de>,
-;; http://perma-curious.eu/post-elisp-diff/, who has graciously given his 
+;; http://perma-curious.eu/post-elisp-diff/, who has graciously given his
 ;; permission to use it.
 (defun cody--diff-worker (a b)
   "Diff A and B.

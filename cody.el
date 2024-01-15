@@ -24,7 +24,6 @@
 (require 'jsonrpc)
 (require 'uuidgen)
 (require 'cody-diff)
-(require 'cody-utils)
 
 (defgroup cody nil
   "Sourcegraph Cody."
@@ -38,7 +37,10 @@ This information is used by Sourcegraph to improve the product."
   :type 'boolean)
 
 (defcustom cody-workspace-root (getenv "HOME")
-  "Directory which Cody considers your current project root."
+  "Directory which Cody considers your current project root.
+You can override this to tell Cody to load up and focus on a
+specific project, or by default Cody will attempt to infer it
+from common project structures."
   :group 'cody
   :type 'string)
 
@@ -185,6 +187,10 @@ Argument CC is the completion object."
 The node version is only checked on Cody startup.
 You can call `cody-restart' to force it to re-check the version.")
 
+(defvar cody--unit-testing-p nil
+  "Set to non-nil during unit testing.
+When testing, all calls to the agent are diverted..")
+
 (defun cody--agent-command ()
   "Command and arguments for running agent."
   (list (or cody-node-executable "node") cody--cody-agent))
@@ -267,6 +273,29 @@ Symbol properties are used reduce namespace clutter.")
   "Return seconds since epoch."
   (float-time (current-time)))
 
+;; Utilities
+
+(defsubst cody--bol ()
+  "Alias for `line-beginning-position'."
+  ;; Why did they retire `point-at-bol'? :-(
+  (line-beginning-position))
+
+(defsubst cody--eol ()
+  "Alias for `line-end-position'."
+  (line-beginning-position))
+
+(defsubst cody--key-for-command (command &optional keymap)
+  "Get user-visible key sequence for COMMAND."
+  (when-let ((keys (where-is-internal command keymap)))
+    (key-description (car keys))))
+
+(defun cody--buffer-active-p (&optional buf)
+  "Return non-nil if BUF is active. BUF defaults to the current buffer."
+  (or cody--unit-testing-p
+      (let ((buffer (or buf (current-buffer))))
+        (and (eq buffer (window-buffer (selected-window)))
+             (get-buffer-window buffer t)))))
+
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;   machine `cody--sourcegraph-host' login apikey password sgp_SECRET
 (defun cody--access-token ()
@@ -291,16 +320,13 @@ Symbol properties are used reduce namespace clutter.")
         ;; fails if the serverEndpoint doesn't know the codebase.
         :codebase "https://github.com/sourcegraph/cody"))
 
-(defun cody--request (method &rest params)
-  "Helper to send a Cody request for METHOD with PARAMS."
-  ;; TODO: Make requests cancellable and implement $/cancelRequest.
-  (jsonrpc-request (cody--connection) method params))
-
 (defun cody--alive-p ()
   "Return non-nil if the jsonrpc connection is still running."
-  (and cody--connection
-       (cody--check-node-version)
-       (zerop (process-exit-status (jsonrpc--process cody--connection)))))
+  (or cody--unit-testing-p
+      (and cody--connection
+           (cody--check-node-version)
+           (zerop (process-exit-status
+                   (jsonrpc--process cody--connection))))))
 
 (defun cody--connection ()
   "Return the agent process, starting one if it is not already running."
@@ -318,14 +344,29 @@ Symbol properties are used reduce namespace clutter.")
                      :connection-type 'pipe
                      :stderr (get-buffer-create "*cody stderr*")
                      :noquery t)))
-    (jsonrpc-request cody--connection 'initialize
-                     (list
-                      :name "Emacs"
-                      :version "0.1"
-                      :workspaceRootUri (cody--workspace-root)
-                      :extensionConfiguration (cody--extension-configuration)))
-    (jsonrpc-notify cody--connection 'initialized nil))
+    (cody--request 'initialize
+                   (list
+                    :name "Emacs"
+                    :version "0.1"
+                    :workspaceRootUri (cody--workspace-root)
+                    :extensionConfiguration (cody--extension-configuration)))
+    (cody--notify 'initialized nil))
   cody--connection)
+
+(defun cody--request (method params &rest args)
+  "Wrapper for `jsonrpc-request' that makes it testable."
+  (unless cody--unit-testing-p  
+    (apply #'jsonrpc-request (cody--connection) method params args)))
+
+(defun cody--notify (method params &rest args)
+  "Helper to send a Cody request for METHOD with PARAMS."
+  (unless cody--unit-testing-p
+    (apply #'jsonrpc-notify (cody--connection) method params args)))
+
+(defun cody--async-request (method params &rest args)
+  "Wrapper for `jsonrpc-async-request' that makes it testable."
+  (unless cody--unit-testing-p
+    (apply #'jsonrpc-async-request method params args)))
 
 (defun cody--check-node-version ()
   "Signal an error if the default node.js version is too low.
@@ -531,8 +572,8 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
           (unwind-protect
               (progn
                 (with-current-buffer buf
-                  (jsonrpc-notify
-                   (cody--connection) op
+                  (cody--notify
+                   op
                    (list
                     :filePath (buffer-file-name buf)
                     :content (buffer-substring-no-properties (point-min)
@@ -547,17 +588,20 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
   "Save the current point and mark position before each command.
 To cut down on namespace pollution they are stored as symbol
 properties of the symbol `cody--post-command-function'."
-  (put 'cody--vars 'last-point (point))
-  (put 'cody--vars 'last-mark (mark))
-  (put 'cody--vars 'last-hash (buffer-hash)))
+  (condition-case err
+      (when (cody--overlay-visible-p)
+        ;; We save these three to check after the command completes.
+        (put 'cody--vars 'last-point (point))
+        (put 'cody--vars 'last-mark (mark))
+        (put 'cody--vars 'last-hash (buffer-hash)))
+    (error (cody--log "Error in pre-command function: %s" err))))
 
 (defun cody--post-command-function ()
   "If point or mark has moved, update selection/focus with agent.
 Installed on `post-command-hook', which see."
   (condition-case err
       (when (and (cody--overlay-visible-p)
-                 ;; Buffer modifications are handled by our
-                 ;; `after-change-functions'.
+                 ;; Buffer changes are handled by `cody--after-change'.
                  (equal (get 'cody--vars 'last-hash) (buffer-hash)))
         (let* ((last-point (get 'cody--vars 'last-point))
                (last-mark (get 'cody--vars 'last-mark))
@@ -577,12 +621,12 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
   ;; Does not send the file contents. You can leave it undefined when
   ;; you're just updating the selection or caret.
   (when cody-mode
-    (jsonrpc-notify (cody--connection) 'textDocument/didFocus
-                    (list
-                     :filePath (buffer-file-name (current-buffer))
-                     ;; Specifically leave :content undefined here.
-                     :selection (cody--selection-get-current
-                                 (current-buffer))))
+    (cody--notify 'textDocument/didFocus
+                  (list
+                   :filePath (buffer-file-name (current-buffer))
+                   ;; Specifically leave :content undefined here.
+                   :selection (cody--selection-get-current
+                               (current-buffer))))
     ;; Maybe set a timer to trigger an automatic completion.
     ;; Do some trivial rejects here before setting the timer.
     (when (and cursor-moved-p
@@ -637,17 +681,17 @@ BEG and END are the region that changed, and LEN is its length."
           ;; as it works in other clients. But our zero-width overlays
           ;; are making it a very slippery problem that needs revisiting.
           ((enable-this-code-branch nil) ; t to turn back on
-          ;; Make sure there's a suggestion at the end of the change.
+           ;; Make sure there's a suggestion at the end of the change.
            (ovl (cody--overlay-delta-at end))
            (suggested-text (overlay-get ovl 'after-string))
            ;; BEG and END are as per contract of `after-change-functions'.
            (inserted-text (buffer-substring beg end)) ; "" for deletions
            (ignored (or
-                     ;; inserted text exactly matches the front of what's
-                     ;; left of the suggestion string at point, or,
+                     ;; Inserted text exactly matches the front of what's
+                     ;; left of the suggestion string at point.
                      (and (zerop len)
                           (string-prefix-p inserted-text suggested-text))
-                     ;; user deleted only spaces and tabs on the current line,
+                     ;; User deleted only spaces and tabs on the current line.
                      (and (plusp len) ; deletion (len is num chars deleted)
                           (string-match "^[ \t]*$"
                                         (get 'cody--vars 'deleted-text))))))
@@ -696,8 +740,7 @@ Optional argument METHOD is the agent protocol method with PARAMS."
       (when (and cody-mode
                  buffer-file-name
                  (cody--last-buffer-for-file-p))
-        (jsonrpc-notify (cody--connection) 'textDocument/didClose
-                        (list :filePath buffer-file-name)))
+        (cody--notify 'textDocument/didClose `(:filePath ,buffer-file-name)))
     (error (cody--log "Error notifying agent closing %s: err"
                       buffer-file-name err))
     (:success (cody--log "Notified agent closed %s" buffer-file-name))))
@@ -806,10 +849,11 @@ Cody chat buffer should be current, and PARAMS non-nil."
 
 (defun cody--kill-process ()
   "Shut down the jsonrpc connection."
-  (when cody--connection
-    (ignore-errors
-      (jsonrpc-shutdown cody--connection 'cleanup-buffers))
-    (setq cody--connection nil)))
+  (unless cody--unit-testing-p
+    (when cody--connection
+      (ignore-errors
+        (jsonrpc-shutdown cody--connection 'cleanup-buffers))
+      (setq cody--connection nil))))
 
 (defun cody ()
   "Prompt for a recipe and arguments."
@@ -847,11 +891,16 @@ there is a connection."
 (defun cody-restart ()
   "Shut down and restart Cody.  Mostly for debugging."
   (interactive)
-  (let ((cody--node-version-status 'good))
-    (ignore-errors
-      (cody-logout)))
-  (setq cody--node-version-status nil)
-  (cody-login))
+  (let ((buffers (cl-loop for buf in (buffer-list)
+                          when (with-current-buffer buf cody-mode)
+                          collect buf)))
+    (let ((cody--node-version-status 'good))
+      (ignore-errors (cody-logout)))
+    (setq cody--node-version-status nil)
+    (cody-login)
+    (dolist (buf buffers)
+      (with-current-buffer buf
+        (cody-mode)))))
 
 (defun cody-unload-function ()
   "Handle `unload-feature' for this package."
@@ -1025,17 +1074,20 @@ Does syntactic smoke screens before requesting completion from Agent."
        (list :filePath file
              :position (list :line line :character col)
              :triggerKind trigger-kind)
-       :deferred 'cody  ; have new requests replace pending ones
+       ;; have new requests replace pending ones
+       :deferred 'cody
        :success-fn (lambda (response)
                      (cody--handle-completion-result
                       response buf cursor trigger-kind))
-       :error-fn (lambda (err) (cody--log "Error requesting completion: %s" err))
-       :timeout-fn (lambda () (cody--log "Error: request-completion timed out"))))))
+       :error-fn
+       (lambda (err) (cody--log "Error requesting completion: %s" err))
+       :timeout-fn
+       (lambda () (cody--log "Error: request-completion timed out"))))))
 
 (defun cody--handle-completion-result (response buf request-spot kind)
   "Dispatches completion result based on jsonrpc RESPONSE.
 BUF and REQUEST-SPOT specify where the request was initiated.
-KIND specifies whether this was requested manually or automatically"
+KIND specifies whether this was triggered manually or automatically"
   (when (cody--buffer-active-p buf)
     (with-current-buffer buf
       (let ((items (plist-get response :items))
@@ -1200,7 +1252,7 @@ RANGE-START is the start buffer position of the text being replaced.
 Returns a list of insertions of the form ((buffer-pos . text) ...)."
   ;; Agent protocol necessitates computing the character diffs between
   ;; the current line in the buffer, and the suggested "completion",
-  ;; which acts more like a rewrite of the current line. 
+  ;; which acts more like a rewrite of the current line.
   (condition-case err
       (cody-diff-strings-with-positions buffer-text
                                         first-line
@@ -1222,8 +1274,7 @@ remove all traces of the last code completion response."
 EVENT is a Sourcegraph GraphQL event."
   ;; TODO: Need to switch this to the new 'telemetry/recordEvent'
   (condition-case err
-      (jsonrpc-notify (cody--connection) 'telemetry/recordEvent
-                      (list :publicArgument event))
+      (cody--notify 'telemetry/recordEvent (list :publicArgument event))
     (error (cody--log "Error logging graphql event: %s" err))))
 
 (defun cody--accept-completion ()
@@ -1241,7 +1292,7 @@ EVENT is a Sourcegraph GraphQL event."
       (insert text)
       (indent-region range-start (point)))
     (cody--telemetry-completion-accepted)
-    (jsonrpc-notify cody--connection 'autocomplete/clearLastCandidate nil)
+    (cody--notify 'autocomplete/clearLastCandidate nil)
     (cody--discard-completion)))
 
 (defun cody--discard-completion ()
@@ -1384,8 +1435,8 @@ DIRECTION should be 1 for next, and -1 for previous."
     (when-let ((cc (cody--cc)))
       (cody-set-completion-event-prop cc :acceptedAt (cody--timestamp))
       (condition-case err
-          (jsonrpc-notify
-           (cody--connection) 'telemetry/recordEvent
+          (cody--notify
+           'telemetry/recordEvent
            (cody--create-graphql-event "CodyEmacsPlugin:completion:accepted"
                                        (cody--add-completion-event-params
                                         nil (cody-completion-event-prop cc :params))))
@@ -1395,22 +1446,21 @@ DIRECTION should be 1 for next, and -1 for previous."
   "TODO: This needs to be rewritten asap for the new protocol."
   (when cody-telemetry-enable-p
     (when-let* ((cc (cody--cc))
-                (latency (max (- (cody--completion-timestamp :displayedAt)
-                                 (cody--completion-timestamp :triggeredAt)) 0))
-                (duration (max (- (cody--timestamp) ; :hiddenAt
-                                  (cody--completion-timestamp :displayedAt)) 0))
+                (latency (max 0 (- (cody--completion-timestamp :displayedAt)
+                                 (cody--completion-timestamp :triggeredAt))))
+                (duration (max 0 (- (cody--timestamp) ; :hiddenAt
+                                  (cody--completion-timestamp :displayedAt))))
                 (params (cody-completion-event-prop cc :params)))
       (condition-case err
-          (jsonrpc-notify
-           (cody--connection) 'telemetry/recordEvent
-           (cody--create-graphql-event
-            "CodyEmacsPlugin:completion:suggested"
-            (cody--add-completion-event-params
-             (list
-              :latency latency
-              :displayDuration duration
-              :isAnyKnownPluginEnabled (cody--other-plugins-enabled-p))
-             params)))
+          (cody--notify 'telemetry/recordEvent
+                        (cody--create-graphql-event
+                         "CodyEmacsPlugin:completion:suggested"
+                         (cody--add-completion-event-params
+                          (list
+                           :latency latency
+                           :displayDuration duration
+                           :isAnyKnownPluginEnabled (cody--other-plugins-enabled-p))
+                          params)))
         (error (cody--log "Telemetry error in completion:suggested: %s" err))))))
 
 (defun cody--add-completion-event-params (event-params &optional params)
@@ -1442,6 +1492,27 @@ Both parameters are plists representing json objects."
      :publicArgument params
      :client "EMACS_CODY_EXTENSION"
      :deviceID uuid)))
+
+;; Development utilities.
+
+(defun cody--edebug-inspect (obj)
+  "Pretty-print OBJ, one of our EIEIO objects while debugging.
+It pops the pretty-printed object tree into a separate buffer.
+Invoke this while debugging from an *edebug* buffer, e.g. with:
+
+  (cody--edebug-inspect (cody--cc))
+
+to see the current completion response object in detail.
+"
+  (let ((buf (get-buffer-create "*Edebug Object Dump*")))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert (pp-to-string
+               (mapcar (lambda (slot)
+                         (cons (eieio-slot-descriptor-name slot)
+                               (eieio-oref obj (eieio-slot-descriptor-name slot))))
+                       (eieio-class-slots (eieio-object-class obj))))))
+    (pop-to-buffer buf)))
 
 (provide 'cody)
 ;;; cody.el ends here

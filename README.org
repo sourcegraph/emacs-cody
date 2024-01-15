@@ -4,7 +4,13 @@ Do not use this yet; it is in development.
 
 * Status
 
-Starts and initializes the agent, and establishes a jsonrpc connection.
+- Code autocompletions should be usable now.
+- Telemetry probably isn't working; API has changed and it needs
+  to be re-implemented for the new protocol.
+-   
+
+* Configuration
+
 It uses a distributed copy of the Cody agent as compressed javascript, but
 you can override this by specifying the location of the agent binary, e.g.:
 
@@ -21,7 +27,7 @@ token directly:
   (setq cody--access-token "sgp_etc")
 #+end_src
 
-To try it out, evaluate the buffer.
+To try it out, evaluate the buffer and `M-x cody-login'.
 
 Note: For now, if you are using the extension and want ripgrep support,
 you will want to add this to your `~/.bashrc` or equivalent:
@@ -30,14 +36,32 @@ you will want to add this to your `~/.bashrc` or equivalent:
   export MOCK_RG_PATH="/opt/homebrew/bin/rg" # path to your rg binary
 #+end_src
 
+** Sample Configuration
+
+You can create a Sourcegraph access token at https://sourcegraph.com/users/yourname/settings/tokens.
+
+#+begin_src emacs-lisp
+  ;; Tell `use-package' where to find your clone of `cody.el'.
+  (add-to-list 'load-path (expand-file-name "~/my/path/to/emacs-cody"))
+
+  (use-package cody ; NOTE: This is all deferred until Cody is loaded.
+    :straight nil
+    :commands (cody-login cody-restart cody-chat cody-mode)
+    :init
+    (setq cody--sourcegraph-host "sourcegraph.com") ; for clarity; this is the default.
+    (setq cody--access-token "sgp_asdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdf")
+    (setopt cody-workspace-root "/your/path/to/some/project/dir") ; optional
+    (setenv "MOCK_RG_PATH" "/opt/homebrew/bin/rg") ; ripgrep
+    :config
+    (defalias 'cody-start 'cody-login))
+#+end_src  
+
 * Available commands
 
   `M-x cody` will start Cody and prompt you with available commands
   `M-x cody-chat` will pop you immediately into the Q&A command
 
-The chat is currently pretty unsatisfying - your queries are done in
-the minibuffer, and the output is appended to a read-only chat buffer.
-In the future it should probably work more like ChatGPT or a shell.
+Chat is just a stub for now.
 
 * Debugging
 
