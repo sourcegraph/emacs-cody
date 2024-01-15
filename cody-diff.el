@@ -14,7 +14,7 @@
 
 (eval-when-compile (require 'cl-lib))
 
-(defvar cody--list-diff-cache (make-hash-table :test 'eq)
+(defvar cody--list-diff-cache (make-hash-table :test 'equal)
   "Memoization cache for `cody--list-diff'.")
 
 (defun cody-diff-lists (a b)
