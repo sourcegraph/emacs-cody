@@ -44,9 +44,14 @@ You can create a Sourcegraph access token at https://sourcegraph.com/users/yourn
   ;; Tell `use-package' where to find your clone of `cody.el'.
   (add-to-list 'load-path (expand-file-name "~/my/path/to/emacs-cody"))
 
-  (use-package cody ; NOTE: This is all deferred until Cody is loaded.
+  (use-package cody
     :straight nil
     :commands (cody-login cody-restart cody-chat cody-mode)
+    ;; Some common key bindings.
+    :bind (("C-M-n" . cody-completion-cycle-next-key-dispatch)
+           ("C-M-p" . cody-completion-cycle-prev-key-dispatch)
+           ("M-TAB" . cody-completion-accept-key-dispatch)
+           ("C-M-g" . cody-quit-key-dispatch))
     :init
     (setq cody--sourcegraph-host "sourcegraph.com") ; for clarity; this is the default.
     (setq cody--access-token "sgp_asdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdf")

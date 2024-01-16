@@ -92,9 +92,10 @@ This helps distinguish Cody's completions from other packages."
 (defcustom cody-completions-enable-cycling-p t
   "Non-nil to allow cycling among alternative completion suggestions.
 These are not always available, but when they are, you can cycle
-between them with `cody-next-completion' and `cody-prev-completion'.
-When nil, cycling is completely disabled, and only the first option
-returned by the server is ever displayed or interactible."
+between them with `cody-completion-cycle-next' and
+`cody-completion-cycle-prev'.  When nil, cycling is completely
+disabled, and only the first option returned by the server is
+ever displayed or interactible."
   :group 'cody
   :type 'boolean)
 
@@ -189,7 +190,7 @@ You can call `cody-restart' to force it to re-check the version.")
 
 (defvar cody--unit-testing-p nil
   "Set to non-nil during unit testing.
-When testing, all calls to the agent are diverted..")
+When testing, all calls to the agent are diverted.")
 
 (defun cody--agent-command ()
   "Command and arguments for running agent."
@@ -199,7 +200,7 @@ When testing, all calls to the agent are diverted..")
 (defvar cody--message-in-progress nil "Chat message accumulator.")
 
 (defvar cody--sourcegraph-host "sourcegraph.com" "Sourcegraph host.")
-(defvar cody--access-token nil "LLM access token for `cody--sourcegraph-host'.")
+(defvar cody--access-token nil "Access token for `cody--sourcegraph-host'.")
 
 (defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
 (defconst cody--chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
@@ -213,12 +214,12 @@ When testing, all calls to the agent are diverted..")
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c /") cody-prefix-map)
     (define-key map (kbd "M-\\") 'cody-request-completion) ; for IntelliJ users
-    (define-key map (kbd "TAB") 'cody--tab-key) ; accept completions
-    (define-key map (kbd "C-g") 'cody--ctrl-g-key)
-    (define-key map (kbd "ESC ESC ESC") 'cody--ctrl-g-key)
+    (define-key map (kbd "TAB") 'cody-completion-accept-key-dispatch)
+    (define-key map (kbd "C-g") 'cody-quit-key-dispatch)
+    (define-key map (kbd "ESC ESC ESC") 'cody-quit-key-dispatch)
     (when cody-completions-enable-cycling-p
-      (define-key map (kbd "M-n") 'cody-next-completion)
-      (define-key map (kbd "M-p") 'cody-prev-completion))
+      (define-key map (kbd "M-n") 'cody-completion-cycle-next-key-dispatch)
+      (define-key map (kbd "M-p") 'cody-completion-cycle-prev-key-dispatch))
     map)
   "Keymap for `cody-mode'.")
 
@@ -243,7 +244,7 @@ with the Cody Agent.")
 
 (defvar-local cody--completion nil
   "Most recent completion response object from the Cody Agent.
-This is an instance of a variable `cody-completion' object, which see.
+This is an instance of a variable `cody-completion' object.
 Each time we request a new completion, it gets discarded and replaced.")
 
 (defvar cody--completion-timer nil
@@ -283,11 +284,6 @@ Symbol properties are used reduce namespace clutter.")
 (defsubst cody--eol ()
   "Alias for `line-end-position'."
   (line-beginning-position))
-
-(defsubst cody--key-for-command (command &optional keymap)
-  "Get user-visible key sequence for COMMAND."
-  (when-let ((keys (where-is-internal command keymap)))
-    (key-description (car keys))))
 
 (defun cody--buffer-active-p (&optional buf)
   "Return non-nil if BUF is active. BUF defaults to the current buffer."
@@ -355,7 +351,7 @@ Symbol properties are used reduce namespace clutter.")
 
 (defun cody--request (method params &rest args)
   "Wrapper for `jsonrpc-request' that makes it testable."
-  (unless cody--unit-testing-p  
+  (unless cody--unit-testing-p
     (apply #'jsonrpc-request (cody--connection) method params args)))
 
 (defun cody--notify (method params &rest args)
@@ -522,6 +518,7 @@ BEG and END are as per the contract of `before-change-functions'."
   ;; Store it as a symbol property to avoid cluttering the namespace.
   ;; I'm going to leave it here as it's generally useful, though it
   ;; will be ignored until we get typing-in-completions working.
+  ;; TODO: typing in completions
   (condition-case err
       (when (cody--overlay-visible-p)
         (when (and
@@ -828,7 +825,7 @@ Cody chat buffer should be current, and PARAMS non-nil."
         (cody--minor-mode-shutdown))))
   (when (cody--alive-p)
     (ignore-errors
-      (cody--request 'shutdown)) ; Required by the protocol
+      (cody--request 'shutdown nil)) ; Required by the protocol
     (ignore-errors
       (cody--kill-process))
     (ignore-errors ; sometimes jsonrpc doesn't clean this one up
@@ -858,7 +855,7 @@ Cody chat buffer should be current, and PARAMS non-nil."
 (defun cody ()
   "Prompt for a recipe and arguments."
   (interactive)
-  (let* ((recipes (cody--request 'recipes/list))
+  (let* ((recipes (cody--request 'recipes/list nil))
          (recipe (completing-read "recipe: "
                                   (seq-map (lambda (elt)
                                              (plist-get elt :id))
@@ -965,7 +962,8 @@ Pushes the new overlay onto the front of `cody--overlay-deltas'."
       (overlay-put o 'cody t)
       (overlay-put o 'keymap cody-completion-map)
       (overlay-put o 'priority '(nil . 50))
-      (overlay-put o 'help-echo "TAB to accept")
+      (overlay-put o 'help-echo
+                   "\\[cody-completion-accept-key-dispatch] to accept")
       (cody--overlay-set-text o text)
       (push o cody--overlay-deltas)
       o)))
@@ -996,7 +994,7 @@ is not currently at the start of a completion suggestion delta."
                            (= (overlay-start o) (point))))
              return o)))
 
-(defmacro cody--call-if-at-overlay (func key &optional fuzzy)
+(defmacro cody--call-if-at-overlay (func &optional fuzzy)
   "If point is at the start of the completion overlay, invoke FUNC.
 Otherwise, call the default non-Cody key binding for KEY.
 If FUZZY is non-nil, then the check ignores whitespace between point
@@ -1004,22 +1002,28 @@ and the start of the overlay."
   `(if (cody--point-at-overlay-p ,fuzzy)
        (funcall ,func)
      (let (cody-mode) ; avoid recursion
-       (call-interactively (key-binding (kbd ,key))))))
+       (call-interactively (key-binding (this-command-keys))))))
 
 (defun cody--execute-default-keybinding ()
   "Execute default command for the key sequence invoking current command."
   (when-let ((cmd (lookup-key global-map (this-command-keys))))
     (call-interactively cmd)))
 
-(defun cody--tab-key ()
-  "Handler for TAB key."
+(defun cody-completion-accept-key-dispatch ()
+  "Handler for the key that accepts a completion.
+If we are at the Cody overlay, use the Cody binding; otherwise use
+the default binding."
   (interactive)
-  (cody--call-if-at-overlay 'cody--accept-completion "TAB"))
+  (cody--call-if-at-overlay 'cody--accept-completion))
 
-(defun cody--ctrl-g-key ()
-  "Handler for quit; clears/rejects the completion suggestion."
+(defun cody-quit-key-dispatch ()
+  "Handler for `keyboard-quit'; clears the completion suggestion.
+Also calls the default key binding."
   (interactive)
-  (cody--call-if-at-overlay 'cody--discard-completion "C-g" 'fuzzy))
+  (cody--call-if-at-overlay 'cody--discard-completion)
+  ;; Also call default binding.
+  (let (cody-mode) ; avoid recursion
+    (call-interactively (key-binding (this-command-keys)))))
 
 (defun cody--maybe-trigger-completion ()
   "Under the right conditions, trigger an automatic completion request."
@@ -1088,6 +1092,7 @@ Does syntactic smoke screens before requesting completion from Agent."
   "Dispatches completion result based on jsonrpc RESPONSE.
 BUF and REQUEST-SPOT specify where the request was initiated.
 KIND specifies whether this was triggered manually or automatically"
+  ;; TODO: Handle rate-limiting.
   (when (cody--buffer-active-p buf)
     (with-current-buffer buf
       (let ((items (plist-get response :items))
@@ -1176,11 +1181,12 @@ RESPONSE is the entire jsonrpc response."
            (cody--make-overlay next-lines pos))
          (when (and cody-completions-cycling-help-p
                     (cody--multiple-items-p cc))
-           (message "Showing suggestion %s of %s (%s/%s to cycle)"
-                    (1+ index)
-                    (cody--num-items cc)
-                    (cody--key-for-command #'cody-next-completion)
-                    (cody--key-for-command #'cody-prev-completion))))
+           (message
+            (substitute-command-keys
+             (concat "Showing suggestion %s of %s "
+                     "(\\[cody-completion-cycle-next-key-dispatch]/"
+                     "\\[cody-completion-cycle-prev-key-dispatch] to cycle)"))
+            (1+ index) (cody--num-items cc))))
       (error
        (cody--log "Error setting completion text: %s" err)
        (cody--hide-completion)))))
@@ -1309,19 +1315,13 @@ Sends telemetry notifications when telemetry is enabled."
         cody--update-debounce-timer nil)
   (setplist 'cody--vars nil))
 
-(defun cody--key-msg-for-command (command)
-  "Return message about the key to press for a given COMMAND."
-  (if-let ((key (cody--key-for-command command)))
-      (format "%s to accept" key)
-    "No key is bound to accept"))
-
 (defun cody--check-cycle-preconditions ()
   "Return non-nil if we meet all the preconditions for cycling.
 If not, then it handles logging and messaging."
   (let ((verbose (or cody-completions-cycling-help-p
                      (and (called-interactively-p 'interactive)
                           (memq this-command
-                                '(cody-next-completion cody-prev-completion)))))
+                                '(cody-completion-cycle-next cody-completion-cycle-prev)))))
         (cc (cody--cc)))
     (cl-labels ((explain (msg &rest args)
                   (let ((output (apply #'message msg args)))
@@ -1330,20 +1330,18 @@ If not, then it handles logging and messaging."
                     nil))) ; return nil to signal failed check
       (cond
        ((not cody-completions-enable-cycling-p)
-        (explain "Set `cody-completions-enable-cycling-p' to enable cycling."))
+        (explain "Set `cody-completions-enable-cycling-p' to enable cycling"))
        ((not (and cc (cody--current-item cc)))
         (explain "No completion here"))
        ((not (cody--multiple-items-p cc))
-        (explain "No other suggestions; %s"
-                 (cody--key-msg-for-command 'cody--tab-key)))
-       (t 'success))))) ; cycling is not available
+        (explain "No other suggestions"))
+       (t 'success)))))
 
 (defun cody--cycle-completion (direction)
   "Cycle through the completion items in the specified DIRECTION.
 DIRECTION should be 1 for next, and -1 for previous."
   (if (cody--check-cycle-preconditions)
-      (if-let* (
-                (cc (cody--cc))
+      (if-let* ((cc (cody--cc))
                 (items (cody--completion-items cc))
                 (index (cody--current-item-index cc))
                 (num (cody--num-items cc))
@@ -1354,14 +1352,30 @@ DIRECTION should be 1 for next, and -1 for previous."
                 (setf (cody--current-item-index cc) next) ; Set index to new val.
                 (cody--display-completion))
             (error
-             (cody--log "Error displaying completion: %s \ncompletion: %s" err cc)))
+             (cody--log "Error displaying completion: %s \ncompletion: %s"
+                        err cc)))
         (when cody-completions-cycling-help-p
           (message "Error cycling through completions"))
         (cody--log "Error cycling through completions: items= %s" items))
     (when cody-completions-cycling-help-p
-      (message "No more suggestions. TAB to accept."))))
+      (message
+       (concat "No more suggestions. "
+               (substitute-command-keys
+                "\\[cody-completion-accept-key-dispatch] to accept."))))))
 
-(defun cody-next-completion ()
+(defun cody-completion-cycle-next-key-dispatch ()
+  "Cycles to next completion only if the point is at an overlay.
+If point is not at the overlay, dispatches to the default binding."
+  (interactive)
+  (cody--call-if-at-overlay #'cody-completion-cycle-next))
+
+(defun cody-completion-cycle-prev-key-dispatch ()
+  "Cycles to prev completion only if the point is at an overlay.
+If point is not at the overlay, dispatches to the default binding."
+  (interactive)
+  (cody--call-if-at-overlay #'cody-completion-cycle-prev))
+
+(defun cody-completion-cycle-next ()
   "Move to the next completion alternative."
   (interactive)
   (if (and cody-completions-enable-cycling-p
@@ -1369,7 +1383,7 @@ DIRECTION should be 1 for next, and -1 for previous."
       (cody--cycle-completion 1)
     (cody--execute-default-keybinding)))
 
-(defun cody-prev-completion ()
+(defun cody-completion-cycle-prev ()
   "Move to the previous completion alternative."
   (interactive)
   (if (and cody-completions-enable-cycling-p
@@ -1447,9 +1461,9 @@ DIRECTION should be 1 for next, and -1 for previous."
   (when cody-telemetry-enable-p
     (when-let* ((cc (cody--cc))
                 (latency (max 0 (- (cody--completion-timestamp :displayedAt)
-                                 (cody--completion-timestamp :triggeredAt))))
+                                   (cody--completion-timestamp :triggeredAt))))
                 (duration (max 0 (- (cody--timestamp) ; :hiddenAt
-                                  (cody--completion-timestamp :displayedAt))))
+                                    (cody--completion-timestamp :displayedAt))))
                 (params (cody-completion-event-prop cc :params)))
       (condition-case err
           (cody--notify 'telemetry/recordEvent

@@ -186,7 +186,7 @@ int main() {
         ;; Make sure cody-mode starts up without failing.
         (should cody-mode)
         ;; Should pass if the response looks good.
-        (when nil ; This test is -almost- working!
+        (when nil ; TODO: This test is -almost- working!
           (should (cody--handle-completion-result
                    response (current-buffer) pos "Automatic"))
           ;; Check that the event is dropped if the point was moved.
