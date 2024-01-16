@@ -131,6 +131,7 @@ If nil, no messages are printed when cycling is available or used."
    (completionEvent :initarg :completionEvent
                     :initform nil
                     :type (or null list)
+                    :accessor cody--completion-event
                     :documentation "Event associated with the completion.")
    (response :initarg :response
              :initform nil
@@ -637,7 +638,7 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
   ;; This is a debounce so we don't request one until they stop typing.
   ;; It requests immediately after they go idle.
   (setq cody--completion-timer
-        (run-with-idle-timer 0.1 nil #'cody--maybe-trigger-completion)))
+        (run-with-idle-timer 0.05 nil #'cody--maybe-trigger-completion)))
 
 (defun cody--cancel-completion-timer ()
   "Cancel any pending timer to check for automatic completions."
@@ -652,10 +653,11 @@ BUF can be a buffer or buffer name, and we return a Range with `start'
 and `end' parameters, each a Position of 1-indexed `line' and `character'.
 The return value is appropiate for sending directly to the rpc layer."
   (cl-flet ((pos-parameters (pos)
-              (list :line (line-number-at-pos pos)
+              ;; agent protocol range line/char are always 0-indexed
+              (list :line (1- (line-number-at-pos pos))
                     :character (save-excursion
                                  (goto-char pos)
-                                 (1+ (current-column))))))
+                                 (current-column)))))
     (with-current-buffer buf
       (let* ((mark (if mark-active (mark) (point)))
              (point (point))
@@ -695,7 +697,7 @@ BEG and END are the region that changed, and LEN is its length."
           (progn
             ;; This should recompute the necessary deltas.
             (cody--hide-completion)
-            (cody--display-completion))
+            (cody--completion-display))
         ;; All other buffer changes make the overlay go away.
         (cody--hide-completion))
     (error (cody--log "Error in after-change function: %s" err))))
@@ -1112,7 +1114,7 @@ KIND specifies whether this was triggered manually or automatically"
             (setq cody--completion (cody--populate-from-response response)))
           (cody--update-completion-timestamp :displayedAt)
           (condition-case err
-              (cody--display-completion)
+              (cody--completion-display)
             (error
              (cody--log "Error displaying completion: %s" err)))))))))
 
@@ -1148,7 +1150,7 @@ Converts from line/char to buffer positions."
 Converts from line/char to buffer positions."
   (cody--position-to-point (plist-get range :end)))
 
-(defun cody--display-completion ()
+(defun cody--completion-display ()
   "Show the server's code autocompletion suggestion.
 RESPONSE is the entire jsonrpc response."
   (when-let*
@@ -1168,7 +1170,7 @@ RESPONSE is the entire jsonrpc response."
        (insertions (cody--compute-diff-deltas buffer-text
                                               first-line
                                               range-start)))
-    ;; TODO: log completion suggested with id of suggested item.
+    (cody--completion-log-event 'autocomplete/completionSuggested)
     (condition-case err
         ;; Add one overlay span per delta in the first line.
         (cl-loop
@@ -1275,13 +1277,15 @@ remove all traces of the last code completion response."
   (when cody--completion
     (setf (cody--current-item-index (cody--cc)) 0)))
 
-(defun cody--graphql-log-event (event)
-  "Send a `telemetry/recordEvent' to the agent.
-EVENT is a Sourcegraph GraphQL event."
-  ;; TODO: Need to switch this to the new 'telemetry/recordEvent'
-  (condition-case err
-      (cody--notify 'telemetry/recordEvent (list :publicArgument event))
-    (error (cody--log "Error logging graphql event: %s" err))))
+(defun cody--completion-log-event (notification)
+  "Sends a required autocomplete notification to the agent.
+NOTIFICATION is the fire-and-forget protocol message to send.
+Does nothing if custom option `cody-telemetry-enable-p' is nil."
+  (when cody-telemetry-enable-p
+    (let ((event-id (plist-get (cody--completion-event (cody--cc)) :id)))
+      (condition-case err
+          (cody--notify notification (list :completionID event-id))
+        (error (cody--log "Error on id=%s %s: %s" event-id notification err))))))
 
 (defun cody--accept-completion ()
   "Accept and discard the completion, and notify server."
@@ -1297,16 +1301,13 @@ EVENT is a Sourcegraph GraphQL event."
       (goto-char range-start)
       (insert text)
       (indent-region range-start (point)))
-    (cody--telemetry-completion-accepted)
-    (cody--notify 'autocomplete/clearLastCandidate nil)
+    (cody--completion-log-event 'autocomplete/completionSuggested)
     (cody--discard-completion)))
 
 (defun cody--discard-completion ()
   "Discard/reset the current completion overlay and suggestion data.
 Sends telemetry notifications when telemetry is enabled."
   (cody--cancel-completion-timer)
-  (unless (eq (cody--completion-status) 'triggered)
-    (cody--telemetry-completion-suggested))
   (cody--hide-completion)
   (setq cody--completion nil
         cody--completion-timestamps nil
@@ -1337,7 +1338,7 @@ If not, then it handles logging and messaging."
         (explain "No other suggestions"))
        (t 'success)))))
 
-(defun cody--cycle-completion (direction)
+(defun cody--completion-cycle (direction)
   "Cycle through the completion items in the specified DIRECTION.
 DIRECTION should be 1 for next, and -1 for previous."
   (if (cody--check-cycle-preconditions)
@@ -1350,7 +1351,7 @@ DIRECTION should be 1 for next, and -1 for previous."
               (progn
                 (cody--hide-completion) ; This sets index to 0.
                 (setf (cody--current-item-index cc) next) ; Set index to new val.
-                (cody--display-completion))
+                (cody--completion-display))
             (error
              (cody--log "Error displaying completion: %s \ncompletion: %s"
                         err cc)))
@@ -1380,7 +1381,7 @@ If point is not at the overlay, dispatches to the default binding."
   (interactive)
   (if (and cody-completions-enable-cycling-p
            (cody--point-at-overlay-p))
-      (cody--cycle-completion 1)
+      (cody--completion-cycle 1)
     (cody--execute-default-keybinding)))
 
 (defun cody-completion-cycle-prev ()
@@ -1388,7 +1389,7 @@ If point is not at the overlay, dispatches to the default binding."
   (interactive)
   (if (and cody-completions-enable-cycling-p
            (cody--point-at-overlay-p))
-      (cody--cycle-completion -1)
+      (cody--completion-cycle -1)
     (cody--execute-default-keybinding)))
 
 (defun cody-dashboard ()
@@ -1436,63 +1437,17 @@ If point is not at the overlay, dispatches to the default binding."
     'displayed)
    (t 'hidden)))
 
+(defun cody--other-plugins-enabled-p ()
+  "Return non-nil if another coding assistant is active concurrently."
+  (let ((features-to-check '(copilot tabnine)))
+    (cl-some (lambda (feature) (featurep feature)) features-to-check)))
+
 (defun cody--anonymized-uuid ()
   "Return, generating if needed, variable `cody--anonymized-uuid'."
   (or cody--anonymized-uuid
       (setq cody--anonymized-uuid (uuidgen-4))
       (custom-save-all)
       cody--anonymized-uuid))
-
-(defun cody--telemetry-completion-accepted ()
-  "Notify the telemetry collector that a completion was accepted."
-  (when cody-telemetry-enable-p
-    (when-let ((cc (cody--cc)))
-      (cody-set-completion-event-prop cc :acceptedAt (cody--timestamp))
-      (condition-case err
-          (cody--notify
-           'telemetry/recordEvent
-           (cody--create-graphql-event "CodyEmacsPlugin:completion:accepted"
-                                       (cody--add-completion-event-params
-                                        nil (cody-completion-event-prop cc :params))))
-        (error (cody--log "Telemetry error in completion:accepted: %s" err))))))
-
-(defun cody--telemetry-completion-suggested ()
-  "TODO: This needs to be rewritten asap for the new protocol."
-  (when cody-telemetry-enable-p
-    (when-let* ((cc (cody--cc))
-                (latency (max 0 (- (cody--completion-timestamp :displayedAt)
-                                   (cody--completion-timestamp :triggeredAt))))
-                (duration (max 0 (- (cody--timestamp) ; :hiddenAt
-                                    (cody--completion-timestamp :displayedAt))))
-                (params (cody-completion-event-prop cc :params)))
-      (condition-case err
-          (cody--notify 'telemetry/recordEvent
-                        (cody--create-graphql-event
-                         "CodyEmacsPlugin:completion:suggested"
-                         (cody--add-completion-event-params
-                          (list
-                           :latency latency
-                           :displayDuration duration
-                           :isAnyKnownPluginEnabled (cody--other-plugins-enabled-p))
-                          params)))
-        (error (cody--log "Telemetry error in completion:suggested: %s" err))))))
-
-(defun cody--add-completion-event-params (event-params &optional params)
-  "Add common completion event telemetry to the passed params.
-Both parameters are plists representing json objects."
-  (let ((updated (copy-sequence event-params))
-        (properties (list :id :languageId :source :charCount
-                          :lineCount :multilineMode :providerIdentifier)))
-    (when-let ((summary (plist-get params :contextSummary)))
-      (setq updated (plist-put updated :contextSummary summary)))
-    (dolist (prop properties)
-      (setq updated (plist-put updated prop (plist-get params prop))))
-    updated))
-
-(defun cody--other-plugins-enabled-p ()
-  "Return non-nil if another coding assistant is active concurrently."
-  (let ((features-to-check '(copilot tabnine)))
-    (cl-some (lambda (feature) (featurep feature)) features-to-check)))
 
 (defun cody--create-graphql-event (event-name params)
   "Return a Sourcegraph GraphQL logging event for telemetry."
