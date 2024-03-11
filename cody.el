@@ -251,7 +251,7 @@ Each time we request a new completion, it gets discarded and replaced.")
 (defvar cody--completion-timer nil
   "Maybe trigger a completion each time Emacs goes idle.")
 
-(defvar cody--last-completion-trigger-spot nil "Temp variable.")
+(defvar cody--completion-last-trigger-spot nil "Temp variable.")
 
 (defsubst cody--cc ()
   "Return the current buffer-local version of `cody--completion'."
@@ -276,6 +276,15 @@ Symbol properties are used reduce namespace clutter.")
   (float-time (current-time)))
 
 ;; Utilities
+
+(defmacro cody--call-safely (func &rest args)
+  "Call FUNC with ARGS safely. Report an error if the call fails."
+  `(condition-case err
+       (apply ,func ,args)
+     (error (cody--log "Error calling %s: %s" (if (symbolp ,func)
+                                                  (symbol-name ,func)
+                                                "a lambda")
+                       err))))
 
 (defsubst cody--bol ()
   "Alias for `line-beginning-position'."
@@ -490,6 +499,8 @@ Changes to the buffer will be tracked by the Cody agent"
 
 (defun cody--minor-mode-startup ()
   "Code to run when `cody-mode' is enabled in a buffer."
+  (unless (cody--alive-p)
+    (cody-login))
   (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil t))
   (cody--sync-buffer-to-agent 'textDocument/didOpen)
@@ -499,7 +510,7 @@ Changes to the buffer will be tracked by the Cody agent"
 
 (defun cody--minor-mode-shutdown ()
   "Code to run when `code-mode' is disabled in a buffer."
-  (cody--discard-completion)
+  (cody--completion-discard)
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func t))
   ;; Kill any zombie overlays; it can happen.
@@ -507,7 +518,7 @@ Changes to the buffer will be tracked by the Cody agent"
            when (overlay-get overlay 'cody)
            do (delete-overlay overlay))
   (setq cody-mode nil) ; this clears the modeline and other vars
-  (cody--cancel-completion-timer)
+  (cody--completion-cancel-timer)
   (message "Cody mode disabled"))
 
 (defun cody--before-change (beg end)
@@ -542,7 +553,7 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
   (if (cody--overlay-visible-p)
       ;; Either recompute or hide the overlay, based on the change.
       (cody--handle-typing-while-suggesting beg end len)
-    (cody--start-completion-timer)))
+    (cody--completion-start-timer)))
 
 (defun cody--cancel-debounce-timer ()
   "Cancel debounce timer, returning non-nil if a timer was cancelled."
@@ -564,23 +575,21 @@ Installed on `after-change-functions' buffer-local hook in `cody-mode'."
   "Make the jsonrpc call to notify agent of opened/changed file.
 Argument BUF is the buffer whose contents will be sent.
 Argument OP is the protocol operation, e.g. `textDocument/didChange'."
-  (condition-case err
-      (when cody-mode
+  (when cody-mode
+    (condition-case err
         (let ((happy nil))
           (unwind-protect
-              (progn
-                (with-current-buffer buf
-                  (cody--notify
-                   op
-                   (list
-                    :filePath (buffer-file-name buf)
-                    :content (buffer-substring-no-properties (point-min)
-                                                             (point-max))
-                    :selection (cody--selection-get-current buf)))))
+              (with-current-buffer buf
+                (cody--notify
+                 op
+                 (list :filePath (buffer-file-name buf)
+                       :content (buffer-substring-no-properties
+                                 (point-min) (point-max))
+                       :selection (cody--selection-get-current buf))))
             (setq happy t))
           (unless happy
-            (cody--log "Unable to update Cody agent for %s" buffer-file-name))))
-    (error (cody--log "Error sending file %s: %s" buffer-file-name err))))
+            (cody--log "Unable to update Cody agent for %s" buffer-file-name)))
+      (error (cody--log "Error sending file %s: %s" buffer-file-name err)))))
 
 (defun cody--pre-command-function ()
   "Save the current point and mark position before each command.
@@ -630,17 +639,17 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
     (when (and cursor-moved-p
                (cody--buffer-active-p))
       (if (cody--overlay-visible-p)
-          (cody--hide-completion)
-        (cody--start-completion-timer)))))
+          (cody--completion-hide)
+        (cody--completion-start-timer)))))
 
-(defun cody--start-completion-timer ()
+(defun cody--completion-start-timer ()
   "Set a cancellable timer to check for an automatic completion."
   ;; This is a debounce so we don't request one until they stop typing.
   ;; It requests immediately after they go idle.
   (setq cody--completion-timer
         (run-with-idle-timer 0.05 nil #'cody--maybe-trigger-completion)))
 
-(defun cody--cancel-completion-timer ()
+(defun cody--completion-cancel-timer ()
   "Cancel any pending timer to check for automatic completions."
   (when cody--completion-timer
     (cancel-timer cody--completion-timer)
@@ -696,10 +705,10 @@ BEG and END are the region that changed, and LEN is its length."
                                         (get 'cody--vars 'deleted-text))))))
           (progn
             ;; This should recompute the necessary deltas.
-            (cody--hide-completion)
+            (cody--completion-hide)
             (cody--completion-display))
         ;; All other buffer changes make the overlay go away.
-        (cody--hide-completion))
+        (cody--completion-hide))
     (error (cody--log "Error in after-change function: %s" err))))
 
 (defun cody--next-overlay-delta (beg)
@@ -1016,13 +1025,13 @@ and the start of the overlay."
 If we are at the Cody overlay, use the Cody binding; otherwise use
 the default binding."
   (interactive)
-  (cody--call-if-at-overlay 'cody--accept-completion))
+  (cody--call-if-at-overlay 'cody--completion-accept))
 
 (defun cody-quit-key-dispatch ()
   "Handler for `keyboard-quit'; clears the completion suggestion.
 Also calls the default key binding."
   (interactive)
-  (cody--call-if-at-overlay 'cody--discard-completion)
+  (cody--call-if-at-overlay 'cody--completion-discard)
   ;; Also call default binding.
   (let (cody-mode) ; avoid recursion
     (call-interactively (key-binding (this-command-keys)))))
@@ -1070,11 +1079,11 @@ Does syntactic smoke screens before requesting completion from Agent."
     (when (and (not buffer-read-only)
                (or (string= trigger-kind "Invoke")
                    ;; Avoid spamming if the cursor hasn't moved.
-                   (not (eql cursor cody--last-completion-trigger-spot))))
-      (cody--discard-completion) ; Clears telemetry from previous request.
+                   (not (eql cursor cody--completion-last-trigger-spot))))
+      (cody--completion-discard) ; Clears telemetry from previous request.
       (cody--flush-pending-changes)
-      (cody--update-completion-timestamp :triggeredAt)
-      (setq cody--last-completion-trigger-spot cursor)
+      (cody--completion-update-timestamp :triggeredAt)
+      (setq cody--completion-last-trigger-spot cursor)
       (jsonrpc-async-request
        (cody--connection) 'autocomplete/execute
        (list :filePath file
@@ -1083,14 +1092,14 @@ Does syntactic smoke screens before requesting completion from Agent."
        ;; have new requests replace pending ones
        :deferred 'cody
        :success-fn (lambda (response)
-                     (cody--handle-completion-result
+                     (cody--completion-handle-result
                       response buf cursor trigger-kind))
        :error-fn
        (lambda (err) (cody--log "Error requesting completion: %s" err))
        :timeout-fn
        (lambda () (cody--log "Error: request-completion timed out"))))))
 
-(defun cody--handle-completion-result (response buf request-spot kind)
+(defun cody--completion-handle-result (response buf request-spot kind)
   "Dispatches completion result based on jsonrpc RESPONSE.
 BUF and REQUEST-SPOT specify where the request was initiated.
 KIND specifies whether this was triggered manually or automatically"
@@ -1110,9 +1119,9 @@ KIND specifies whether this was triggered manually or automatically"
             (message "No completions returned")))
          (t
           (let (cody--completion-timestamps) ; preserve the trigger time from request
-            (ignore-errors (cody--discard-completion))
+            (ignore-errors (cody--completion-discard))
             (setq cody--completion (cody--populate-from-response response)))
-          (cody--update-completion-timestamp :displayedAt)
+          (cody--completion-update-timestamp :displayedAt)
           (condition-case err
               (cody--completion-display)
             (error
@@ -1177,7 +1186,7 @@ RESPONSE is the entire jsonrpc response."
          for (pos . text) in insertions
          do (cody--make-overlay text pos)
          finally do
-         (cody--add-completion-marker (car-safe (last cody--overlay-deltas)))
+         (cody--completion-add-marker (car-safe (last cody--overlay-deltas)))
          ;; Insert following lines, if any, as a single block.
          (when (and next-lines (cl-plusp (length next-lines)))
            (cody--make-overlay next-lines pos))
@@ -1191,7 +1200,7 @@ RESPONSE is the entire jsonrpc response."
             (1+ index) (cody--num-items cc))))
       (error
        (cody--log "Error setting completion text: %s" err)
-       (cody--hide-completion)))))
+       (cody--completion-hide)))))
 
 (defun cody--construct-line-chunks ()
   "Split suggestion into first and remaining lines.
@@ -1227,7 +1236,7 @@ Returns nil if the text does not pass the sanitizing checks."
      (t
       (error "Completion text is blank: %s" text)))))
 
-(defun cody--add-completion-marker (ovl)
+(defun cody--completion-add-marker (ovl)
   "Put a Cody symbol at the end of overlay OVL."
   (when (and cody-completions-display-marker-p
              (overlayp ovl))
@@ -1268,9 +1277,9 @@ Returns a list of insertions of the form ((buffer-pos . text) ...)."
     (error
      (cody--log "Error computing diff deltas: %s" err))))
 
-(defun cody--hide-completion ()
+(defun cody--completion-hide ()
   "Stop showing the current completion suggestion overlays.
-`cody--completion' is left alone; use `cody--discard-completion' to
+`cody--completion' is left alone; use `cody--completion-discard' to
 remove all traces of the last code completion response."
   (mapc #'delete-overlay cody--overlay-deltas)
   (setq cody--overlay-deltas nil)
@@ -1287,7 +1296,7 @@ Does nothing if custom option `cody-telemetry-enable-p' is nil."
           (cody--notify notification (list :completionID event-id))
         (error (cody--log "Error on id=%s %s: %s" event-id notification err))))))
 
-(defun cody--accept-completion ()
+(defun cody--completion-accept ()
   "Accept and discard the completion, and notify server."
   (let* ((cc (cody--cc))
          (item (cody--current-item cc))
@@ -1302,17 +1311,17 @@ Does nothing if custom option `cody-telemetry-enable-p' is nil."
       (insert text)
       (indent-region range-start (point)))
     (cody--completion-log-event 'autocomplete/completionSuggested)
-    (cody--discard-completion)))
+    (cody--completion-discard)))
 
-(defun cody--discard-completion ()
+(defun cody--completion-discard ()
   "Discard/reset the current completion overlay and suggestion data.
 Sends telemetry notifications when telemetry is enabled."
-  (cody--cancel-completion-timer)
-  (cody--hide-completion)
+  (cody--completion-cancel-timer)
+  (cody--completion-hide)
   (setq cody--completion nil
         cody--completion-timestamps nil
         ;; Just to be clear, don't change this or the completion will resurrect.
-        cody--last-completion-trigger-spot cody--last-completion-trigger-spot
+        cody--completion-last-trigger-spot cody--completion-last-trigger-spot
         cody--update-debounce-timer nil)
   (setplist 'cody--vars nil))
 
@@ -1349,7 +1358,7 @@ DIRECTION should be 1 for next, and -1 for previous."
                 (next (% (+ index direction num) num)))
           (condition-case err
               (progn
-                (cody--hide-completion) ; This sets index to 0.
+                (cody--completion-hide) ; This sets index to 0.
                 (setf (cody--current-item-index cc) next) ; Set index to new val.
                 (cody--completion-display))
             (error
@@ -1414,11 +1423,9 @@ If point is not at the overlay, dispatches to the default binding."
       (message "Cody is running! Try `M-x cody-chat' to get started.")
     (message "Cody is not running. 'M-x cody-login' to start hacking.")))
 
-;;;==== Telemetry ==============================================================
+;;; Telemetry
 
-;; TODO: Agent has a new API that theoretically greatly simplifies all this.
-
-(defun cody--update-completion-timestamp (property)
+(defun cody--completion-update-timestamp (property)
   "Set the given timestamp named PROPERTY to the current time."
   (setq cody--completion-timestamps
         (plist-put cody--completion-timestamps property (cody--timestamp))))
