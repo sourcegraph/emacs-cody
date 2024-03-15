@@ -582,7 +582,7 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
               (with-current-buffer buf
                 (cody--notify
                  op
-                 (list :filePath (buffer-file-name buf)
+                 (list :uri (buffer-file-name buf)
                        :content (buffer-substring-no-properties
                                  (point-min) (point-max))
                        :selection (cody--selection-get-current buf))))
@@ -630,7 +630,7 @@ If CURSOR-MOVED-P then we may also trigger a completion timer."
   (when cody-mode
     (cody--notify 'textDocument/didFocus
                   (list
-                   :filePath (buffer-file-name (current-buffer))
+                   :uri (buffer-file-name (current-buffer))
                    ;; Specifically leave :content undefined here.
                    :selection (cody--selection-get-current
                                (current-buffer))))
@@ -748,7 +748,7 @@ Optional argument METHOD is the agent protocol method with PARAMS."
       (when (and cody-mode
                  buffer-file-name
                  (cody--last-buffer-for-file-p))
-        (cody--notify 'textDocument/didClose `(:filePath ,buffer-file-name)))
+        (cody--notify 'textDocument/didClose `(:uri ,buffer-file-name)))
     (error (cody--log "Error notifying agent closing %s: err"
                       buffer-file-name err))
     (:success (cody--log "Notified agent closed %s" buffer-file-name))))
@@ -1086,7 +1086,7 @@ Does syntactic smoke screens before requesting completion from Agent."
       (setq cody--completion-last-trigger-spot cursor)
       (jsonrpc-async-request
        (cody--connection) 'autocomplete/execute
-       (list :filePath file
+       (list :uri file
              :position (list :line line :character col)
              :triggerKind trigger-kind)
        ;; have new requests replace pending ones
