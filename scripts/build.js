@@ -5,7 +5,7 @@ const path = require('path');
 const codyDir = process.env.CODY_DIR;
 
 // Determine the agent directory based on CODY_DIR or sibling directory
-const agentDir = codyDir ? path.resolve(codyDir, 'agent') : path.resolve(__dirname, '../cody/agent');
+const agentDir = codyDir ? path.resolve(codyDir, 'agent') : path.resolve(__dirname, '../../cody/agent');
 const distDir = path.resolve(__dirname, '../dist');
 
 console.log(`Using agent directory: ${agentDir}`);
@@ -36,7 +36,6 @@ if (!fs.existsSync(distDir)) {
     fs.mkdirSync(distDir);
 }
 
-// List of files to copy
 const filesToCopy = [
     'index.js',
     'index.js.map'
@@ -58,7 +57,6 @@ filesToCopy.forEach(file => {
     }
 });
 
-// Copy .wasm files
 const wasmFiles = fs.readdirSync(agentDistDir)
     .filter(file => file.endsWith('.wasm'));
 

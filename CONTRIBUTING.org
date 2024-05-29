@@ -27,9 +27,8 @@ our [issue tracker](https://github.com/sourcegraph/emacs-cody/issues/new/choose)
 *** Dev loop
 
 Once you have it working, working, then any time you make changes to (or
-update) the agent in the sibling `cody` directory, you can re-run `node
-./scripts/build.js` to rebuild and re-copy the distribution files into
-`./dist/`
+update) the agent in the sibling `cody` directory, you can re-run `node ./scripts/build.js`
+to rebuild and re-copy the distribution files into `./dist/`
 
 *** Tree-sitter grammars
 
