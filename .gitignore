@@ -1,3 +1,5 @@
 .envrc
 *.elc
 dist/index.js.map
+dist/*.exe
+dist/*.wasm

@@ -7,17 +7,18 @@ Do not use this yet; it is in development.
 - Code autocompletions should be usable now.
 - Telemetry probably isn't working; API has changed and it needs
   to be re-implemented for the new protocol.
--   
 
 * Configuration
 
-It uses a distributed copy of the Cody agent as compressed javascript, but
+Cody uses a distributed copy of the Cody agent as compressed javascript, but
 you can override this by specifying the location of the agent binary, e.g.:
 
 #+begin_src emacs-lisp
    (setq cody--agent-binary
-         "/path/to/eg/cody/agent/dist/agent-macos-arm64/agent-macos-arm64")
+         "/path/to/eg/cody/agent/dist/agent-macos-arm64")
 #+end_src
+
+** Access token
 
 Fetches your access token via auth-source and hardcodes the instance
 and codebase. You can currently bypass this by setting your access
@@ -29,12 +30,7 @@ token directly:
 
 To try it out, evaluate the buffer and `M-x cody-login'.
 
-Note: For now, if you are using the extension and want ripgrep support,
-you will want to add this to your `~/.bashrc` or equivalent:
-
-#+begin_src shell-script
-  export MOCK_RG_PATH="/opt/homebrew/bin/rg" # path to your rg binary
-#+end_src
+TODO: gnugpg and/or local host keychain support
 
 ** Sample Configuration
 
@@ -69,7 +65,7 @@ You can create a Sourcegraph access token at https://sourcegraph.com/users/yourn
 Chat is just a stub for now.
 
 * Debugging
-
+p
   `M-x cody-login` to start and initialize the agent without doing a command
   `M-x cody-force-unload` to tear everything down
 

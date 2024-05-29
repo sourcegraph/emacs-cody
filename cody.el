@@ -178,7 +178,7 @@ Argument CC is the completion object."
 (defconst cody--cody-agent
   (file-name-concat (file-name-directory (or load-file-name
                                              (buffer-file-name)))
-                    "dist" "cody-agent.js")
+                    "dist" "index.js")
   "Path to bundled cody agent.")
 
 (defconst cody--node-min-version "20.4.0"

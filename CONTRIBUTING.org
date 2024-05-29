@@ -1,0 +1,43 @@
+* Contributing to the Sourcegraph Cody Emacs Plugin
+
+Thank you for your interest in contributing to Sourcegraph! The goal of this
+document is to provide a high-level overview of how you can contribute to the
+Cody Emacs Plugin.
+
+** Issues / Bugs 
+
+New issues and feature requests can be filed through
+our [issue tracker](https://github.com/sourcegraph/emacs-cody/issues/new/choose).
+
+** Development
+
+*** Prerequisites
+
+- Ensure that you have node.js installed.
+  - Current min version is 20.4.0.
+- Set up the Cody agent local build environment.
+  - Clone `https://github.com/sourcegraph/cody` in a sibling directory.
+    - Install its dependencies. The easiest way
+      is [with `asdf`](https://github.com/sourcegraph/cody/blob/main/doc/dev/index.md).
+      If not using `asdf`, you just need to install the dependency versions listed
+      in the `.tool-versions` file in that repository.
+    - From the root directory of the repository, `cd ./agent && pnpm install && pnpm build`
+- Run `node ./scripts/build.js` to rebuild the agent and copy the distribution.
+
+*** Dev loop
+
+Once you have it working, working, then any time you make changes to (or
+update) the agent in the sibling `cody` directory, you can re-run `node
+./scripts/build.js` to rebuild and re-copy the distribution files into
+`./dist/`
+
+*** Tree-sitter grammars
+
+Cody uses (tree-sitter)[https://tree-sitter.github.io/tree-sitter/] for improving
+its responses in various ways. You should consider the WASM files for at least the
+languages you use regularly with Cody to be essential for getting the best results.
+
+We don't currently distribute the WASM files due to their size. They appear as
+artifacts of the build of the agent, in `../cody/agent/dist/`. You can copy them
+all over to `./dist` using the `./build.js` script.
+
