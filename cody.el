@@ -405,17 +405,18 @@ property whose value is the last error received.")
 (defconst cody--mode-hooks
   '((before-change-functions . cody--before-change)
     (after-change-functions . cody--after-change)
-    (kill-buffer-hook . cody--kill-buffer-function)
-    (pre-command-hook . cody--pre-command-function)
-    (post-command-hook . cody--post-command-function))
+    (window-selection-change-functions . cody--handle-focus-changed)
+    (window-buffer-change-functions . cody--handle-focus-changed)
+    (post-command-hook . cody--post-command)
+    (kill-buffer-hook . cody--handle-doc-closed))
   "List of buffer-local hooks that Cody registers on in `cody-mode'.
 These hooks enable it to keep buffers and selections synced
 with the Cody Agent.")
 
-(defvar-local cody--overlay-deltas nil
+(defvar cody--overlay-deltas nil
   "List of overlays for Cody current completion suggestion.")
 
-(defvar-local cody--completion nil
+(defvar cody--completion nil
   "Most recent completion response object from the Cody Agent.
 This is an instance of a variable `cody-completion' object.
 Each time we request a new completion, it gets discarded and replaced.")
@@ -429,10 +430,10 @@ Each time we request a new completion, it gets discarded and replaced.")
   "Return the current buffer-local version of `cody--completion'."
   cody--completion)
 
-(defvar-local cody--completion-timestamps nil
+(defvar cody--completion-timestamps nil
   "Tracks event timestamps for telemetry, as plist properties.")
 
-(defvar-local cody--update-debounce-timer nil
+(defvar cody--update-debounce-timer nil
   "Delay for batching buffer-modification updates to the Agent.")
 
 (defvar cody--vars nil
@@ -441,7 +442,7 @@ Typically used for allowing before/after hooks to communicate data.
 Symbol properties are used reduce namespace clutter.")
 
 (defvar cody-connection-initialized-hook nil
-  "Hook run after 'cody--connection' initializes the connection.
+  "Hook run after `cody--connection' initializes the connection.
 If the connection failed, then `cody--status' will be `error',
 and the symbol `cody--status' will have an `error' property.")
 
@@ -470,17 +471,15 @@ and the symbol `cody--status' will have an `error' property.")
   "Return seconds since epoch."
   (float-time (current-time)))
 
+(defvar-local cody--buffer-state nil
+  "The state of Cody in the current buffer.
+Can be any of nil, `active', `disabled', or `ignored'.
+If no, the buffer's state has not yet been evaluated.
+Disabled means it is not a buffer Cody is interested in,
+whereas ignored means that an admin has configured it
+to be excluded.")
+
 (defvar cody-mode-menu)
-
-(defvar cody--minor-mode-icon
-  (cody--decorate-mode-line-lighter (cody-logo-small))
-  "Mode line lighter for Cody minor-mode.")
-
-(put 'cody--minor-mode-icon 'risky-local-variable t)
-
-(defvar-local cody--mode-line-icon-evaluator
-    '(:eval (when cody-mode cody--minor-mode-icon))
-  "Descriptor for producing a custom menu in the mode line lighter.")
 
 (defvar cody-mode-line-map
   (let ((map (make-sparse-keymap)))
@@ -492,6 +491,14 @@ and the symbol `cody--status' will have an `error' property.")
         ["Help" (describe-function 'cody-mode)]))
     map)
   "Keymap for Cody mode line button.")
+
+(defvar-local cody--mode-line-icon-evaluator
+    '(:eval (when cody-mode
+              (cl-case cody-buffer-state
+                (active (cody--color-icon))
+                (ignored (cody--ignored-icon))
+                (otherwise (cody--monochrome-icon)))))
+  "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
 
@@ -506,7 +513,6 @@ and the symbol `cody--status' will have an `error' property.")
 
 (defsubst cody--bol ()
   "Alias for `line-beginning-position'."
-  ;; Why did they retire `point-at-bol'? :-(
   (line-beginning-position))
 
 (defsubst cody--eol ()
@@ -517,7 +523,7 @@ and the symbol `cody--status' will have an `error' property.")
   "Convert JSON false (:json-false) to nil. Leave other values unchanged."
   (if (eq val :json-false) nil val))
 
-(defun cody--buffer-active-p (&optional buf)
+(defun cody--buffer-visible-p (&optional buf)
   "Return non-nil if BUF is active. BUF defaults to the current buffer."
   (or cody--unit-testing-p
       (let ((buffer (or buf (current-buffer))))
@@ -586,39 +592,39 @@ and the symbol `cody--status' will have an `error' property.")
 (defun cody-populate-server-info (response)
   "Populate the ServerInfo instance from the RESPONSE.
 Returns a `cody-server-info' instance."
-  (let* ((auth-status (plist-get response :authStatus))
-         (auth-status-instance
-          (condition-case err
-              (make-instance
-               'cody-auth-status
-               :username (plist-get auth-status :username)
-               :endpoint (cody--convert-json-false (plist-get auth-status :endpoint))
-               :isDotCom (cody--convert-json-false (plist-get auth-status :isDotCom))
-               :isLoggedIn (cody--convert-json-false (plist-get auth-status :isLoggedIn))
-               :showInvalidAccessTokenError (cody--convert-json-false (plist-get auth-status
-                                                                                 :showInvalidAccessTokenError))
-               :authenticated (cody--convert-json-false (plist-get auth-status :authenticated))
-               :hasVerifiedEmail (cody--convert-json-false (plist-get auth-status :hasVerifiedEmail))
-               :requiresVerifiedEmail (cody--convert-json-false (plist-get auth-status :requiresVerifiedEmail))
-               :siteHasCodyEnabled (cody--convert-json-false (plist-get auth-status :siteHasCodyEnabled))
-               :siteVersion (plist-get auth-status :siteVersion)
-               :codyApiVersion (cody--convert-json-false (plist-get auth-status :codyApiVersion))
-               :configOverwrites (plist-get auth-status :configOverwrites)
-               :showNetworkError (cody--convert-json-false (plist-get auth-status :showNetworkError))
-               :primaryEmail (plist-get auth-status :primaryEmail)
-               :displayName (plist-get auth-status :displayName)
-               :avatarURL (plist-get auth-status :avatarURL)
-               :userCanUpgrade (cody--convert-json-false (plist-get auth-status :userCanUpgrade)))
-            (error
-             (message "Error creating cody-auth-status instance: %s" err)
-             (cody--set-error "Failed to create cody-auth-status instance" err)
-             (signal 'error err)))))
-    (make-instance 'cody-server-info
-                   :name (plist-get response :name)
-                   :authenticated (cody--convert-json-false (plist-get response :authenticated))
-                   :codyEnabled (cody--convert-json-false (plist-get response :codyEnabled))
-                   :codyVersion (plist-get response :codyVersion)
-                   :authStatus auth-status-instance)))
+  (cl-labels ((cjf (val) (cody--convert-json-false val)))
+    (let* ((auth-status (plist-get response :authStatus))
+           (auth-status-instance
+            (condition-case err
+               (make-instance
+                 'cody-auth-status
+                 :username (plist-get auth-status :username)
+                 :endpoint (cjf (plist-get auth-status :endpoint))
+                 :isDotCom (cjf (plist-get auth-status :isDotCom))
+                 :isLoggedIn (cjf (plist-get auth-status :isLoggedIn))
+                 :showInvalidAccessTokenError (cjf (plist-get auth-status :showInvalidAccessTokenError))
+                 :authenticated (cjf (plist-get auth-status :authenticated))
+                 :hasVerifiedEmail (cjf (plist-get auth-status :hasVerifiedEmail))
+                 :requiresVerifiedEmail (cjf (plist-get auth-status :requiresVerifiedEmail))
+                 :siteHasCodyEnabled (cjf (plist-get auth-status :siteHasCodyEnabled))
+                 :siteVersion (plist-get auth-status :siteVersion)
+                 :codyApiVersion (cjf (plist-get auth-status :codyApiVersion))
+                 :configOverwrites (plist-get auth-status :configOverwrites)
+                 :showNetworkError (cjf (plist-get auth-status :showNetworkError))
+                 :primaryEmail (plist-get auth-status :primaryEmail)
+                 :displayName (plist-get auth-status :displayName)
+                 :avatarURL (plist-get auth-status :avatarURL)
+                 :userCanUpgrade (cjf (plist-get auth-status :userCanUpgrade)))
+              (error
+               (message "Error creating cody-auth-status instance: %s" err)
+               (cody--set-error "Failed to create cody-auth-status instance" err)
+               (signal 'error err)))))
+      (make-instance 'cody-server-info
+                     :name (plist-get response :name)
+                     :authenticated (cjf (plist-get response :authenticated))
+                     :codyEnabled (cjf (plist-get response :codyEnabled))
+                     :codyVersion (plist-get response :codyVersion)
+                     :authStatus auth-status-instance))))
 
 (defun cody--initialize-connection ()
   "Required handshake exchanging ClientInfo and ServerInfo."
@@ -748,17 +754,32 @@ You can override it with `cody-workspace-root'."
 
 ;;; Code for cody minor mode:
 
+;; TODO: Use the svgs; keep pngs for now.
 (defun cody-logo ()
-  "Return the Cody large logo image, memoizing on first call."
+  "Return the Cody large logo image."
   (or (get 'cody-logo 'cached-image)
       (put 'cody-logo 'cached-image
            (create-image (cody-logo-file "cody-logo.png")))))
 
 (defun cody-logo-small ()
-  "Return the Cody modeline image, memoizing on first call."
+  "Return the Cody modeline image."
   (or (get 'cody-logo-small 'cached-image)
       (put 'cody-logo-small 'cached-image
            (create-image (cody-logo-file "cody-logo-small.png")))))
+
+(defun cody--color-icon ()
+  "Return the color modeline icon."
+  (cody-logo-small))
+
+(defun cody--monochrome-icon ()
+  "Return the monochrome icon."
+  ;; TODO: Return dark or light logo based on theme
+  (cody-logo-small))
+
+(defun cody--ignored-icon ()
+  "Return the buffer-is-ignored icon."
+  ;; TODO: Return dark or light logo based on theme
+  (cody-logo-small))
 
 (defun cody-logo-file (file-base)
   "Construct path to bundled cody image file.
@@ -793,12 +814,11 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
         (red-exclamation (if (eq cody--status 'error)
                              (propertize "!" 'face '(:foreground "red"))
                            "")))
-    (concat icon " " red-exclamation)))
+    (concat icon red-exclamation)))
 
 ;;;###autoload
 (define-minor-mode cody-mode
-  "Minor mode for interacting with the Cody coding assistant.
-Changes to the buffer will be tracked by the Cody agent"
+  "Minor mode for interacting with the Cody coding assistant."
   ;; Never did figure out how to get this option to display a custom menu.
   ;; Currently going with a hack that puts it up at a higher level in the
   ;; mode line, but does produce a custom menu when mouse-1 clicked.
@@ -807,33 +827,40 @@ Changes to the buffer will be tracked by the Cody agent"
   ;;:lighter cody--minor-mode-icon
   :keymap cody-mode-map
   (if cody-mode
-      (cody--minor-mode-startup)
-    (cody--minor-mode-shutdown)))
+      (cody--mode-startup)
+    (cody--mode-shutdown)))
 
-(defun cody--minor-mode-startup ()
-  "Code to run when `cody-mode' is enabled in a buffer."
+(defun cody--mode-startup ()
+  "Code to run when `cody-mode' is turned on in a buffer."
   (unless (cody--alive-p)
     (cody-login))
-  (cl-loop for (hook . func) in cody--mode-hooks
-           do (add-hook hook func nil t))
-  (cody--sync-buffer-to-agent 'textDocument/didOpen)
+  (cl-loop for (hook . func) in cody--buffer-local-hooks
+           do (add-hook hook func nil 'local))
   (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
   (force-mode-line-update t)
-  (message "Cody mode enabled"))
+  (cody--handle-focus-changed (selected-window)))
 
-(defun cody--minor-mode-shutdown ()
-  "Code to run when `code-mode' is disabled in a buffer."
-  (setq cody--server-info nil)
+(defun cody--mode-shutdown ()
+  "Code to run when `cody-mode' is turned off in a buffer."
   (cody--completion-discard)
-  (cl-loop for (hook . func) in cody--mode-hooks
-           do (remove-hook hook func t))
-  ;; Kill any zombie overlays; it can happen.
-  (cl-loop for overlay being the overlays in (current-buffer)
-           when (overlay-get overlay 'cody)
-           do (delete-overlay overlay))
-  (setq cody-mode nil) ; this clears the modeline and other vars
+  (cl-loop for (hook . func) in cody--buffer-local-hooks
+           do (remove-hook hook func 'local))
   (cody--completion-cancel-timer)
-  (message "Cody mode disabled"))
+  (setq cody-mode nil)) ; clears the modeline and buffer-locals
+
+;;;###autoload
+(define-global-minor-mode cody--global-mode
+  cody-mode cody--turn-on-if-applicable)
+
+(defun cody--turn-on-if-applicable ()
+  "Turn on `cody-mode' in this buffer if it satisfies the preconditions."
+  (when (cody--should-enable-cody-p (current-buffer))
+    (cody-mode 1)))
+
+(defun cody--should-enable-cody-p (buffer)
+  "Check if Cody mode should be enabled in BUFFER."
+  (and buffer-file-name ; TODO: support untitled documents
+       (derived-mode-p 'text-mode 'prog-mode)))
 
 (defun cody--before-change (beg end)
   "Before the buffer is changed, remember the old contents.
@@ -860,14 +887,17 @@ BEG and END are as per the contract of `before-change-functions'."
 BEG, END and LEN are all defined by `after-change-hooks'.
 Installed on `after-change-functions' buffer-local hook in `cody-mode'."
   ;; Kick off the `textDocument/didChange' notification.
-  (unless cody--update-debounce-timer
-    (setq cody--update-debounce-timer
-          (run-with-idle-timer cody--debounce-timer-delay nil
-                               #'cody--flush-pending-changes)))
-  (if (cody--overlay-visible-p)
-      ;; Either recompute or hide the overlay, based on the change.
-      (cody--handle-typing-while-suggesting beg end len)
-    (cody--completion-start-timer)))
+  (condition-case err
+      (progn
+        (unless cody--update-debounce-timer
+          (setq cody--update-debounce-timer
+                (run-with-idle-timer cody--debounce-timer-delay nil
+                                     #'cody--flush-pending-changes)))
+        (if (cody--overlay-visible-p)
+            ;; Either recompute or hide the overlay, based on the change.
+            (cody--handle-typing-while-suggesting beg end len)
+          (cody--completion-start-timer)))
+    (error (cody--log "Error in `cody-adfter-change': %s" err))))
 
 (defun cody--cancel-debounce-timer ()
   "Cancel debounce timer, returning non-nil if a timer was cancelled."
@@ -905,56 +935,46 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
             (cody--log "Unable to update Cody agent for %s" buffer-file-name)))
       (error (cody--log "Error sending file %s: %s" buffer-file-name err)))))
 
-(defun cody--pre-command-function ()
-  "Save the current point and mark position before each command.
-To cut down on namespace pollution they are stored as symbol
-properties of the symbol `cody--post-command-function'."
-  (condition-case err
-      (when (cody--overlay-visible-p)
-        ;; We save these three to check after the command completes.
-        (put 'cody--vars 'last-point (point))
-        (put 'cody--vars 'last-mark (mark))
-        (put 'cody--vars 'last-hash (buffer-hash)))
-    (error (cody--log "Error in pre-command function: %s" err))))
+(defun cody--handle-doc-closed ()
+  "Notify agent that the document has been closed."
+  (when (and cody-mode
+             buffer-file-name
+             (eq cody--buffer-state 'active))
+    (cody--notify 'textDocument/didClose
+                  (list :uri buffer-file-name)))) ;; TODO fix
 
-(defun cody--post-command-function ()
-  "If point or mark has moved, update selection/focus with agent.
-Installed on `post-command-hook', which see."
-  (condition-case err
-      (when (and (cody--overlay-visible-p)
-                 ;; Buffer changes are handled by `cody--after-change'.
-                 (equal (get 'cody--vars 'last-hash) (buffer-hash)))
-        (let* ((last-point (get 'cody--vars 'last-point))
-               (last-mark (get 'cody--vars 'last-mark))
-               (point-moved (not (eq last-point (point))))
-               ;; If the mark isn't set, pretend it is set at point,
-               ;; yielding a zero-width range for the current selection.
-               (mark-moved (not (eq last-mark (or (mark) (point))))))
-          (when (or point-moved mark-moved)
-            (cody--handle-focus-changed last-point))))
-    (error
-     (ignore-errors ; don't risk an error or our hook deregisters
-       (cody--log "error in post-command-function %s: %s" last-command err)))))
+(defun cody--handle-focus-changed (window)
+  "Notify agent that a document has been focused or opened."
+  (when (and cody-mode
+             (eq window (selected-window)))
+    (let ((state (with-current-buffer (window-buffer window)
+                   cody--buffer-state)))
+      (cond
+       ((eq state 'active)
+        (cody--notify-document-did-focus))
+       ((null state)
+        (cody--notify-document-did-open)
+        (setq cody--buffer-state 'active))))
+    (if (cody--overlay-visible-p)
+        (cody--completion-hide)
+      (cody--completion-start-timer))))
 
-(defun cody--handle-focus-changed (cursor-moved-p)
-  "Notify agent that cursor or selection has changed in current buffer.
-If CURSOR-MOVED-P then we may also trigger a completion timer."
-  ;; Does not send the file contents. You can leave it undefined when
-  ;; you're just updating the selection or caret.
-  (when cody-mode
-    (cody--notify 'textDocument/didFocus
-                  (list
-                   :uri (buffer-file-name (current-buffer))
-                   ;; Specifically leave :content undefined here.
-                   :selection (cody--selection-get-current
-                               (current-buffer))))
-    ;; Maybe set a timer to trigger an automatic completion.
-    ;; Do some trivial rejects here before setting the timer.
-    (when (and cursor-moved-p
-               (cody--buffer-active-p))
-      (if (cody--overlay-visible-p)
-          (cody--completion-hide)
-        (cody--completion-start-timer)))))
+(defun cody--notify-document-did-open ()
+  "Inform the agent that the current buffer's document just opened."
+  (cody--notify 'textDocument/didOpen
+                (list
+                 ;; TODO: Use new repo utils to get file:/// uri
+                 :uri (buffer-file-name (current-buffer))
+                 :content (buffer-substring-no-properties (point-min) (point-max))
+                 :selection (cody--selection-get-current (current-buffer)))))
+
+(defun cody--notify-document-did-focus ()
+  "Inform the agent that the current buffer's document was just focusd."
+  (cody--notify 'textDocument/didFocus
+                (list
+                 ;; Specifically leave :content undefined here:
+                 :uri (buffer-file-name (current-buffer))
+                 :selection (cody--selection-get-current (current-buffer)))))
 
 (defun cody--completion-start-timer ()
   "Set a cancellable timer to check for an automatic completion."
@@ -989,6 +1009,13 @@ The return value is appropiate for sending directly to the rpc layer."
              (beg-pos (pos-parameters beg))
              (end-pos (pos-parameters end)))
         (list :start beg-pos :end end-pos)))))
+
+(defun cody--post-command ()
+  "If point or mark has moved, update selection/focus with agent.
+Installed on `post-command-hook'."
+  (condition-case err
+      (cody--completion-start-timer)
+    (error (cody--log "Error in `cody--post-command': %s: %s" buffer-file-name err))))
 
 (defun cody--handle-typing-while-suggesting (beg end len)
   "Either recompute completion or dispel it, depending on the change.
@@ -1144,10 +1171,6 @@ Cody chat buffer should be current, and PARAMS non-nil."
 (defun cody-logout ()
   "Stop the Cody agent process and turn Cody off globally."
   (interactive)
-  (dolist (buf (buffer-list))
-    (with-current-buffer buf
-      (when cody-mode
-        (cody--minor-mode-shutdown))))
   (when (cody--alive-p)
     (ignore-errors
       (cody--request 'shutdown nil)) ; Required by the protocol
@@ -1158,7 +1181,8 @@ Cody chat buffer should be current, and PARAMS non-nil."
     (message "Cody has shut down."))
   (setq cody--message-in-progress nil
         ;; Force re-check of node version on Cody startup.
-        cody--node-version-status nil))
+        cody--node-version-status nil
+        cody--server-info nil))
 
 (defun cody-force-unload ()
   "Shut down Cody and remove all Cody-related buffers."
@@ -1211,21 +1235,16 @@ there is a connection."
     (message "Cody connection initialized.")))
 
 (defun cody-restart ()
-  "Shut down and restart Cody.  Mostly for debugging."
+  "Shut down and restart Cody."
   (interactive)
-  (let ((buffers (cl-loop for buf in (buffer-list)
-                          when (with-current-buffer buf cody-mode)
-                          collect buf)))
-    (let ((cody--node-version-status 'good))
-      (ignore-errors (cody-logout)))
-    (setq cody--node-version-status nil)
-    (cody-login)
-    (dolist (buf buffers)
-      (with-current-buffer buf
-        (cody-mode)))))
+  (let ((cody--node-version-status 'good))
+    (ignore-errors (cody-logout)))
+  (setq cody--node-version-status nil)
+  (cody-login))
 
 (defun cody-unload-function ()
   "Handle `unload-feature' for this package."
+  ;; TODO: Test this
   (cody-logout))
 
 (defun cody--log (msg &rest args)
@@ -1351,7 +1370,7 @@ Also calls the default key binding."
     (call-interactively (key-binding (this-command-keys)))))
 
 (defun cody--maybe-trigger-completion ()
-  "Under the right conditions, trigger an automatic completion request."
+  "Possibly trigger an immediate automatic completion request."
   (when (and cody-mode
              cody-completions-auto-trigger-p
              (not (cody--overlay-visible-p))
@@ -1418,7 +1437,7 @@ Does syntactic smoke screens before requesting completion from Agent."
 BUF and REQUEST-SPOT specify where the request was initiated.
 KIND specifies whether this was triggered manually or automatically"
   ;; TODO: Handle rate-limiting.
-  (when (cody--buffer-active-p buf)
+  (when (cody--buffer-visible-p buf)
     (with-current-buffer buf
       (let ((items (plist-get response :items))
             (manual (equal kind "Invoke")))
@@ -1596,9 +1615,17 @@ Returns a list of insertions of the form ((buffer-pos . text) ...)."
 `cody--completion' is left alone; use `cody--completion-discard' to
 remove all traces of the last code completion response."
   (mapc #'delete-overlay cody--overlay-deltas)
+  (cody--remove-all-overlays)
   (setq cody--overlay-deltas nil)
   (when cody--completion
     (setf (cody--current-item-index (cody--cc)) 0)))
+
+(defun cody--remove-all-overlays ()
+  "Remove all Cody overlays in the current buffer."
+  ;; I've seen zombie overlays in edge cases; this cleans them up.
+  (cl-loop for overlay being the overlays in (current-buffer)
+           when (overlay-get overlay 'cody)
+           do (delete-overlay overlay)))
 
 (defun cody--completion-log-event (notification)
   "Sends a required autocomplete notification to the agent.
@@ -1798,6 +1825,7 @@ If point is not at the overlay, dispatches to the default binding."
           (insert "\n")
           (isec "Cody Settings")
           (insert ":\n")
+          ;; TODO: Can we just query these from the root groups?
           (cl-loop for var in cody--custom-variables
                    do (ifield (format "  %s" var) (format "%s" (symbol-value var))
                               'font-lock-variable-name-face))
