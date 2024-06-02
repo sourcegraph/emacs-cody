@@ -579,10 +579,7 @@ to be excluded.")
               :connection-type 'pipe
               :stderr (get-buffer-create "*cody stderr*")
               :noquery t))))
-    (ignore-errors
-      ;; We often log entire file contents here; this makes the log readable.
-      (with-current-buffer (get-buffer "*cody events*")
-        (toggle-truncate-lines 1)))
+    (activate-cody-event-log-mode)
     (cody--initialize-connection))
   cody--connection)
 
@@ -1903,6 +1900,62 @@ Return an alist where each element is (GROUP . VARIABLES)."
      :publicArgument params
      :client "EMACS_CODY_EXTENSION"
      :deviceID uuid)))
+
+;;; Event log
+
+(defvar cody-event-log-keywords
+  (let* ((x-keywords '("initialize" "initialized" "debug/message" "remoteRepo/didChange"))
+         (x-keywords-regexp (regexp-opt x-keywords 'words)))
+    `((,x-keywords-regexp . font-lock-keyword-face))))
+
+(defun cody-event-log-shortening-handler ()
+  "Hide long lines in the buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward "\"content\":\"[^\"]+\"" nil t)
+      (let* ((beginning (match-beginning 0))
+             (end (match-end 0))
+             (overlay (make-overlay beginning (min end (+ beginning 100)))))
+        (overlay-put overlay 'display (concat
+                                       (buffer-substring beginning (+ beginning 97))
+                                       "... [truncated]"))
+        (overlay-put overlay 'cody-original-content (buffer-substring beginning end))
+        (overlay-put overlay 'face 'font-lock-comment-face)
+        (overlay-put overlay 'cody-shortened t)
+        (add-text-properties beginning end '(read-only t))))))
+
+(defun cody-event-log-expand-handler (point)
+  "Expand the content at POINT if it's shortened."
+  (interactive "d")
+  (let ((overlay (car (overlays-at point))))
+    (when (and overlay (overlay-get overlay 'cody-shortened))
+      (let ((original (overlay-get overlay 'cody-original-content)))
+        (delete-overlay overlay)
+        (remove-text-properties (point-min) (point-max) '(read-only t))
+        (goto-char point)
+        (delete-region (point) (+ point 100))
+        (insert original)
+        (add-text-properties (point-min) (point-max) '(read-only t))
+        (message "Expanded content")))))
+
+(define-derived-mode cody-event-log-mode fundamental-mode "Cody Event Log"
+  "Major mode for viewing Cody event logs with special features."
+  (setq font-lock-defaults '(cody-event-log-keywords))
+  (cody-event-log-shortening-handler))
+
+(define-key cody-event-log-mode-map (kbd "C-c C-e") 'cody-event-log-expand-handler)
+
+(defun activate-cody-event-log-mode ()
+  "Activate `cody-event-log-mode' in the `*cody events*' buffer."
+  (run-with-idle-timer
+   0.1 nil
+   (lambda ()
+     (condition-case err
+         (progn
+           (with-current-buffer (get-buffer "*cody events*")
+             (cody-event-log-mode)))
+       (error (cody--log "Failed to activate cody-event-log-mode: %s"
+                         (error-message-string err)))))))
 
 ;; Development utilities.
 
