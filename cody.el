@@ -335,6 +335,9 @@ Sends this flag as part of the agent extension configuration."
   :group 'cody-dev
   :type 'boolean)
 
+(defconst cody--defgroups '(cody cody-completions cody-dev)
+  "List of Cody-related `defgroup's to include in `cody-dashboard'.")
+
 ;;; State variables.
 
 (defconst cody--dotcom-url "https://sourcegraph.com/")
@@ -433,9 +436,6 @@ Each time we request a new completion, it gets discarded and replaced.")
 (defvar cody--completion-timestamps nil
   "Tracks event timestamps for telemetry, as plist properties.")
 
-(defvar cody--update-debounce-timer nil
-  "Delay for batching buffer-modification updates to the Agent.")
-
 (defvar cody--vars nil
   "Symbol used as scratch space for ephemeral temp variables.
 Typically used for allowing before/after hooks to communicate data.
@@ -463,9 +463,6 @@ and the symbol `cody--status' will have an `error' property.")
     cody--dev-enable-agent-debug-p
     cody--dev-enable-agent-debug-verbose-p)
   "List of custom variables to display in `cody-dashboard'.")
-
-(defconst cody--debounce-timer-delay 0.05
-  "Wait at least this long between notifications of buffer content changes.")
 
 (defsubst cody--timestamp ()
   "Return seconds since epoch."
@@ -733,18 +730,22 @@ Min version is configurable with `cody--dev-node-min-version'."
              "Error: Installed nodejs version %s is lower than min version %s"
              node-version cody--dev-node-min-version))))))))
 
-;; TODO: reconcile these next two models
-(defun cody--current-project ()
-  "Get the current project for the buffer."
-  (or (project-current)
-      (error "No project found")))
-
 (defun cody--workspace-root ()
   "Return the workspace root for the Agent.
-You can override it with `cody-workspace-root'."
+You can override it with `cody-workspace-root'.
+Will always return a value that is non-nil, and tries hard to
+make it a reasonable root for the current project."
   (or cody-workspace-root
-      (and buffer-file-name (file-name-directory buffer-file-name))
-      (getenv "HOME")))
+      (ignore-errors
+        (project-root (project-current)))
+      (let ((home-from-env (getenv "HOME")))
+        (if (and home-from-env (file-accessible-directory-p home-from-env))
+            home-from-env
+          ;; Inline locate-dominating-file to find a readable directory
+          (or (locate-dominating-file default-directory
+                                      (lambda (dir)
+                                        (file-accessible-directory-p dir)))
+              "/tmp")))))
 
 (defun cody--get-custom-request-headers-as-map (custom-request-headers)
   "Convert CUSTOM-REQUEST-HEADERS string to a map."
@@ -867,73 +868,52 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 This is primarily so that we can detect when the user deleted
 whitespace backward before the point at the completion suggestion.
 BEG and END are as per the contract of `before-change-functions'."
-  ;; This is the only way to know what text was removed in deletions.
-  ;; Store it as a symbol property to avoid cluttering the namespace.
-  ;; I'm going to leave it here as it's generally useful, though it
-  ;; will be ignored until we get typing-in-completions working.
-  ;; TODO: typing in completions
   (condition-case err
       (when (cody--overlay-visible-p)
-        (when (and
-               (/= beg end) ; if the change is to be a deletion
-               ;; We only support deletions limited to within the line.
-               (not (string-match-p "\n" (buffer-substring beg end))))
-          (put 'cody--vars 'deleted-text
-               (buffer-substring-no-properties beg end))))
+        (save-restriction
+          (widen)
+          ;; Store the range and old content before the change.
+          (put 'cody--vars 'cody--before-change-state
+               (list :range (list :begin begin :end end)
+                     :old-content (buffer-substring-no-properties begin end)))))
     (error (cody--log "Error in `cody-before-change': %s" err))))
 
-(defun cody--after-change (beg end len)
-  "Respond to any change made in the buffer.
-BEG, END and LEN are all defined by `after-change-hooks'.
-Installed on `after-change-functions' buffer-local hook in `cody-mode'."
-  ;; Kick off the `textDocument/didChange' notification.
+(defun cody--after-change-function (begin end old-length)
+  "Notify the agent of a document contents change.
+BEGIN and END are the range of the changed text,
+OLD-LENGTH is the length of the pre-change text replaced by that range."
   (condition-case err
       (progn
-        (unless cody--update-debounce-timer
-          (setq cody--update-debounce-timer
-                (run-with-idle-timer cody--debounce-timer-delay nil
-                                     #'cody--flush-pending-changes)))
+        (save-restriction
+          (widen)
+          ;; Only proceed if the change was an insertion or deletion.
+          (when (or (not (= old-length 0)) (> (- end begin) 0))
+            (let* ((before-state (get 'cody--vars 'cody--before-change-state))
+                   (new-content (buffer-substring-no-properties begin end))
+                   (start-pos (plist-get (plist-get before-state :range) :begin))
+                   (old-content (plist-get before-state :old-content)))
+              (cody--notify 'textDocument/didChange
+                            (list
+                             :uri (cody--uri-for (buffer-file-name))
+                             :contentChanges
+                             (list
+                              (list
+                               :range (list :start (cody--position-from-offset start-pos)
+                                            :end (cody--position-from-offset begin))
+                               :rangeLength old-length
+                               :text new-content)))))))
         (if (cody--overlay-visible-p)
             ;; Either recompute or hide the overlay, based on the change.
             (cody--handle-typing-while-suggesting beg end len)
           (cody--completion-start-timer)))
-    (error (cody--log "Error in `cody-adfter-change': %s" err))))
+    (error (cody--log "Error in `cody-after-change': %s" err))))
 
-(defun cody--cancel-debounce-timer ()
-  "Cancel debounce timer, returning non-nil if a timer was cancelled."
-  (when cody--update-debounce-timer
-    (cancel-timer cody--update-debounce-timer)
-    (setq cody--update-debounce-timer nil)
-    'cancelled))
-
-(defun cody--flush-pending-changes ()
-  "If there is pending data, send it to the agent."
-  (when-let ((had-pending-changes-p (cody--cancel-debounce-timer)))
-    (cody--sync-buffer-to-agent 'textDocument/didChange)))
-
-(defun cody--sync-buffer-to-agent (operation)
-  "Send the full file contents to the agent with OPERATION."
-  (cody--send-file-to-agent (current-buffer) operation))
-
-(defun cody--send-file-to-agent (buf op)
-  "Make the jsonrpc call to notify agent of opened/changed file.
-Argument BUF is the buffer whose contents will be sent.
-Argument OP is the protocol operation, e.g. `textDocument/didChange'."
-  (when cody-mode
-    (condition-case err
-        (let ((happy nil))
-          (unwind-protect
-              (with-current-buffer buf
-                (cody--notify
-                 op
-                 (list :uri (buffer-file-name buf)
-                       :content (buffer-substring-no-properties
-                                 (point-min) (point-max))
-                       :selection (cody--selection-get-current buf))))
-            (setq happy t))
-          (unless happy
-            (cody--log "Unable to update Cody agent for %s" buffer-file-name)))
-      (error (cody--log "Error sending file %s: %s" buffer-file-name err)))))
+(defun cody--position-from-offset (offset)
+  "Convert OFFSET to a Position struct."
+  (save-excursion
+    (goto-char offset)
+    (list :line (line-number-at-pos (point))
+          :character (current-column))))
 
 (defun cody--handle-doc-closed ()
   "Notify agent that the document has been closed."
@@ -941,7 +921,7 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
              buffer-file-name
              (eq cody--buffer-state 'active))
     (cody--notify 'textDocument/didClose
-                  (list :uri buffer-file-name)))) ;; TODO fix
+                  (list :uri (cody--uri-for (buffer-file-name))))))
 
 (defun cody--handle-focus-changed (window)
   "Notify agent that a document has been focused or opened."
@@ -963,17 +943,15 @@ Argument OP is the protocol operation, e.g. `textDocument/didChange'."
   "Inform the agent that the current buffer's document just opened."
   (cody--notify 'textDocument/didOpen
                 (list
-                 ;; TODO: Use new repo utils to get file:/// uri
-                 :uri (buffer-file-name (current-buffer))
+                 :uri (cody--uri-for (buffer-file-name))
                  :content (buffer-substring-no-properties (point-min) (point-max))
                  :selection (cody--selection-get-current (current-buffer)))))
 
 (defun cody--notify-document-did-focus ()
   "Inform the agent that the current buffer's document was just focusd."
   (cody--notify 'textDocument/didFocus
-                (list
-                 ;; Specifically leave :content undefined here:
-                 :uri (buffer-file-name (current-buffer))
+                (list ; Don't include :content, as it didn't change.
+                 :uri (cody--uri-for (buffer-file-name))
                  :selection (cody--selection-get-current (current-buffer)))))
 
 (defun cody--completion-start-timer ()
@@ -1089,11 +1067,10 @@ Optional argument METHOD is the agent protocol method with PARAMS."
       (when (and cody-mode
                  buffer-file-name
                  (cody--last-buffer-for-file-p))
-        (cody--notify 'textDocument/didClose `(:uri ,buffer-file-name)))
-    (error (cody--log "Error notifying agent closing %s: err"
-                      buffer-file-name err))
-    (:success (cody--log "Notified agent closed %s" buffer-file-name))))
-
+        (cody--notify 'textDocument/didClose
+                      (list :uri (cody--uri-for (buffer-file-name)))))
+    (error (cody--log "Error notifying agent closing %s: %s"
+                      buffer-file-name err))))
 
 (defun cody--last-buffer-for-file-p ()
   "Check if the current buffer is the last one visiting its file.
@@ -1403,7 +1380,6 @@ Does syntactic smoke screens before requesting completion from Agent."
   (unless cody-mode
     (error "Cody-mode not enabled in this buffer."))
   (let* ((buf (current-buffer))
-         (file (buffer-file-name buf))
          (line (1- (line-number-at-pos)))
          (col (current-column))
          (cursor (point))
@@ -1419,7 +1395,7 @@ Does syntactic smoke screens before requesting completion from Agent."
       (setq cody--completion-last-trigger-spot cursor)
       (jsonrpc-async-request
        (cody--connection) 'autocomplete/execute
-       (list :uri file
+       (list :uri (cody--uri-for (buffer-file-name))
              :position (list :line line :character col)
              :triggerKind trigger-kind)
        ;; have new requests replace pending ones
@@ -1622,7 +1598,7 @@ remove all traces of the last code completion response."
 
 (defun cody--remove-all-overlays ()
   "Remove all Cody overlays in the current buffer."
-  ;; I've seen zombie overlays in edge cases; this cleans them up.
+  ;; Cleans up any zombies, which does seem to happen, though rarely.
   (cl-loop for overlay being the overlays in (current-buffer)
            when (overlay-get overlay 'cody)
            do (delete-overlay overlay)))
@@ -1742,11 +1718,24 @@ If point is not at the overlay, dispatches to the default binding."
       (cody--completion-cycle -1)
     (cody--execute-default-keybinding)))
 
+(defun cody--filtered-custom-variables (groups)
+  "Get all custom variables in the provided GROUPS, excluding those marked with `no-cody-dashboard`.
+Return an alist where each element is (GROUP . VARIABLES)."
+  (cl-loop for group in groups
+           collect (cons group
+                         (cl-loop for symbol being the symbols
+                                  when (and (custom-variable-p symbol)
+                                            (not (get symbol 'no-cody-dashboard))
+                                            (string-prefix-p (symbol-name group) (symbol-name symbol)))
+                                  collect symbol into vars
+                                  finally return (sort vars #'string<)))))
+
 (defun cody-dashboard ()
   "Show a console with data about Cody configuration and usage."
   (interactive)
   (let ((buf (get-buffer-create "*cody-dashboard*"))
-        (image-marker (make-marker)))
+        (image-marker (make-marker))
+        (grouped-vars (cody--filtered-custom-variables cody--defgroups)))
     (with-current-buffer buf
       (cl-labels ((itext (text &optional face)
                     (insert (propertize (concat text "\n") 'face face)))
@@ -1754,12 +1743,12 @@ If point is not at the overlay, dispatches to the default binding."
                     (insert (propertize header 'face '(:underline t)))
                     (insert "\n"))
                   (ifield (label value &optional face)
-                    (insert (propertize (concat label ": ")
-                                        'face 'font-lock-builtin-face))
+                    (insert (propertize (concat label ": ") 'face 'font-lock-builtin-face))
                     (insert (propertize (concat value "\n") 'face face)))
                   (fbuf (buffer)
                     (setq buffer-read-only t)
-                    (pop-to-buffer buffer)))
+                    (pop-to-buffer buffer)
+                    (goto-char (point-max))))
         (let ((inhibit-read-only t)
               (inhibit-modification-hooks t))
           (erase-buffer)
@@ -1776,61 +1765,63 @@ If point is not at the overlay, dispatches to the default binding."
           (isec "Server Info")
 
           ;; Server Info fields
-          (ifield "Name" (cody--server-info-name cody--server-info)
+          (ifield "  Name" (cody--server-info-name cody--server-info)
                   'font-lock-type-face)
-          (ifield "Authenticated"
+          (ifield "  Authenticated"
                   (if (cody--server-info-authenticated cody--server-info)
                       "Yes" "No")
                   (if (cody--server-info-authenticated cody--server-info)
                       'success 'error))
-          (ifield "Cody Enabled"
+          (ifield "  Cody Enabled"
                   (if (cody--server-info-cody-enabled cody--server-info)
                       "Yes" "No")
                   (if (cody--server-info-cody-enabled cody--server-info)
                       'success 'error))
-          (ifield "Cody Version" (cody--server-info-cody-version
+          (ifield "  Cody Version" (cody--server-info-cody-version
                                   cody--server-info))
 
           (insert "\n")
-          (isec "  Auth Status")
+          (isec "Auth Status")
 
           ;; Auth Status fields
           (when-let ((auth-status (cody--server-info-auth-status
                                    cody--server-info)))
-            (ifield "    Username" (cody--auth-status-username auth-status))
-            (ifield "    Is Logged In"
-                    (if (cody--auth-status-is-logged-in auth-status)
-                        "Yes" "No")
-                    (if (cody--auth-status-is-logged-in auth-status)
-                        'success 'error))
-            (ifield "    Site Has Cody Enabled"
-                    (if (cody--auth-status-site-has-cody-enabled auth-status)
-                        "Yes" "No")
-                    (if (cody--auth-status-site-has-cody-enabled auth-status)
-                        'success 'error))
-            (ifield "    Site Version" (cody--auth-status-site-version
-                                        auth-status))
-            (ifield "    Display Name" (cody--auth-status-display-name
-                                        auth-status))
-            (let ((email (cody--auth-status-primary-email auth-status)))
-              (ifield "    Primary Email" email 'font-lock-string-face)
-              (insert (format "\n%s" (cody--format-mailto-link email))))
-            (insert "\n")
-
             ;; Insert avatar marker
             (set-marker image-marker (point))
+            (insert "\n")
+            (ifield "  Username" (cody--auth-status-username auth-status))
+            (ifield "  Is Logged In"
+                    (if (cody--auth-status-is-logged-in auth-status)
+                        "Yes" "No")
+                    (if (cody--auth-status-is-logged-in auth-status)
+                        'success 'error))
+            (ifield "  Site Has Cody Enabled"
+                    (if (cody--auth-status-site-has-cody-enabled auth-status)
+                        "Yes" "No")
+                    (if (cody--auth-status-site-has-cody-enabled auth-status)
+                        'success 'error))
+            (ifield "  Site Version" (cody--auth-status-site-version
+                                        auth-status))
+            (ifield "  Display Name" (cody--auth-status-display-name
+                                        auth-status))
+            (let ((email (cody--auth-status-primary-email auth-status)))
+              (ifield "  Primary Email" email 'font-lock-string-face))
             (insert "\n"))
 
           ;; Cody Settings fields
           (insert "\n")
           (isec "Cody Settings")
-          (insert ":\n")
-          ;; TODO: Can we just query these from the root groups?
-          (cl-loop for var in cody--custom-variables
-                   do (ifield (format "  %s" var) (format "%s" (symbol-value var))
-                              'font-lock-variable-name-face))
+          (insert "\n")
+          (dolist (group-vars grouped-vars)
+            (let ((group (car group-vars))
+                  (variables (cdr group-vars)))
+              (isec (format "%s" group))
+              (dolist (var variables)
+                (ifield (format "  %s" var) (format "%s" (symbol-value var))
+                        'font-lock-variable-name-face))))
           (fbuf buf))
-        (goto-char (point-min)))
+        (goto-char (point-min))
+        (forward-line 1))
       (cody--dashboard-insert-avatar image-marker))))
 
 (defun cody--dashboard-insert-avatar (image-marker)
@@ -1851,24 +1842,13 @@ If point is not at the overlay, dispatches to the default binding."
                (save-excursion
                  (goto-char image-marker)
                  (let ((inhibit-read-only t))
+                   (insert "  ")
                    ;; Insert image at marker with size limit
                    (insert-image (create-image image-data 'png t
                                                :ascent 'center
                                                :max-height 40
                                                :max-width 40))
                    (insert "\n")))))))))))
-
-(defun cody--format-mailto-link (email)
-  "Return a mailto: link for the given EMAIL."
-  (propertize email
-              'mouse-face 'highlight
-              'keymap (let ((map (make-sparse-keymap)))
-                        (define-key map [mouse-1]
-                                    (lambda ()
-                                      (interactive)
-                                      (browse-url (concat "mailto:" email))))
-                        map)
-              'help-echo "Send email"))
 
 (defun cody-doctor ()
   "Diagnose and troubleshoot Cody issues."
