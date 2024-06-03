@@ -94,6 +94,50 @@ Argument CC is the completion object."
   "Retrieve PROP from the completion event of CC."
   (plist-get (oref cc completionEvent) prop))
 
+(defclass cody-llm-site-configuration ()
+  ((chatModel :initarg :chatModel
+              :initform nil
+              :type (or null string)
+              :accessor cody--llm-chat-model
+              :documentation "Chat model.")
+   (chatModelMaxTokens :initarg :chatModelMaxTokens
+                       :initform nil
+                       :type (or null integer)
+                       :accessor cody--llm-chat-model-max-tokens
+                       :documentation "Chat model max tokens.")
+   (fastChatModel :initarg :fastChatModel
+                  :initform nil
+                  :type (or null string)
+                  :accessor cody--llm-fast-chat-model
+                  :documentation "Fast chat model.")
+   (fastChatModelMaxTokens :initarg :fastChatModelMaxTokens
+                           :initform nil
+                           :type (or null integer)
+                           :accessor cody--llm-fast-chat-model-max-tokens
+                           :documentation "Fast chat model max tokens.")
+   (completionModel :initarg :completionModel
+                    :initform nil
+                    :type (or null string)
+                    :accessor cody--llm-completion-model
+                    :documentation "Completion model.")
+   (completionModelMaxTokens :initarg :completionModelMaxTokens
+                             :initform nil
+                             :type (or null integer)
+                             :accessor cody--llm-completion-model-max-tokens
+                             :documentation "Completion model max tokens.")
+   (provider :initarg :provider
+             :initform nil
+             :type (or null string)
+             :accessor cody--llm-provider
+             :documentation "Provider.")
+   (smartContextWindow :initarg :smartContextWindow
+                       :initform nil
+                       :type (or null boolean)
+                       :accessor cody--llm-smart-context-window
+                       :documentation "Smart context window."))
+  "Class representing Cody LLM site configuration.")
+
+;; Update the cody-auth-status class
 (defclass cody-auth-status ()
   ((username :initarg :username
              :initform ""
@@ -152,7 +196,7 @@ Argument CC is the completion object."
                    :documentation "The API version of Cody.")
    (configOverwrites :initarg :configOverwrites
                      :initform nil
-                     :type (or null plist)
+                     :type (or null cody-llm-site-configuration)
                      :accessor cody--auth-status-config-overwrites
                      :documentation "LLM configuration overwrites.")
    (showNetworkError :initarg :showNetworkError
@@ -490,11 +534,13 @@ to be excluded.")
   "Keymap for Cody mode line button.")
 
 (defvar-local cody--mode-line-icon-evaluator
-    '(:eval (when cody-mode
-              (cl-case cody-buffer-state
-                (active (cody--color-icon))
-                (ignored (cody--ignored-icon))
-                (otherwise (cody--monochrome-icon)))))
+  '(:eval (condition-case err
+              (when cody-mode
+                (cl-case cody--buffer-state
+                  (active (cody--color-icon))
+                  (ignored (cody--ignored-icon))
+                  (otherwise (cody--monochrome-icon))))
+            (error (cody--log "Error in mode line evaluator: %s" err))))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
@@ -586,11 +632,25 @@ to be excluded.")
 (defun cody-populate-server-info (response)
   "Populate the ServerInfo instance from the RESPONSE.
 Returns a `cody-server-info' instance."
-  (cl-labels ((cjf (val) (cody--convert-json-false val)))
+  (cl-labels ((cjf (val) (cody--convert-json-false val))
+              (create-cody-llm-site-configuration (config)
+                (when config
+                  (make-instance
+                   'cody-llm-site-configuration
+                   :chatModel (plist-get config :chatModel)
+                   :chatModelMaxTokens (cjf (plist-get config :chatModelMaxTokens))
+                   :fastChatModel (plist-get config :fastChatModel)
+                   :fastChatModelMaxTokens (cjf (plist-get config :fastChatModelMaxTokens))
+                   :completionModel (plist-get config :completionModel)
+                   :completionModelMaxTokens (cjf (plist-get config :completionModelMaxTokens))
+                   :provider (plist-get config :provider)
+                   :smartContextWindow (cjf (plist-get config :smartContextWindow))))))
     (let* ((auth-status (plist-get response :authStatus))
+           (config-overwrites (create-cody-llm-site-configuration
+                               (plist-get auth-status :configOverwrites)))
            (auth-status-instance
             (condition-case err
-               (make-instance
+                (make-instance
                  'cody-auth-status
                  :username (plist-get auth-status :username)
                  :endpoint (cjf (plist-get auth-status :endpoint))
@@ -603,7 +663,7 @@ Returns a `cody-server-info' instance."
                  :siteHasCodyEnabled (cjf (plist-get auth-status :siteHasCodyEnabled))
                  :siteVersion (plist-get auth-status :siteVersion)
                  :codyApiVersion (cjf (plist-get auth-status :codyApiVersion))
-                 :configOverwrites (plist-get auth-status :configOverwrites)
+                 :configOverwrites config-overwrites
                  :showNetworkError (cjf (plist-get auth-status :showNetworkError))
                  :primaryEmail (plist-get auth-status :primaryEmail)
                  :displayName (plist-get auth-status :displayName)
@@ -653,15 +713,14 @@ Returns a `cody-server-info' instance."
 
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
-  (let ((project (cody--current-project)))
-    (list :anonymousUserID (cody--internal-anonymized-uuid)
-          :serverEndpoint (concat "https://" cody--sourcegraph-host)
-          :accessToken (cody--access-token)
-          :debug cody--dev-enable-agent-debug-p
-          :debug-verbose cody--dev-enable-agent-debug-verbose-p
-          :codebase (cody--workspace-root)
-          :customConfiguration (list (cons :cody.experimental.foldingRanges
-                                           "indentation-based")))))
+  (list :anonymousUserID (cody--internal-anonymized-uuid)
+        :serverEndpoint (concat "https://" cody--sourcegraph-host)
+        :accessToken (cody--access-token)
+        :debug cody--dev-enable-agent-debug-p
+        :debug-verbose cody--dev-enable-agent-debug-verbose-p
+        :codebase (cody--workspace-root)
+        :customConfiguration (list (cons :cody.experimental.foldingRanges
+                                         "indentation-based"))))
 
 (defun cody--notify-configuration-changed ()
   "Notify the agent that the extension configuration has changed."
@@ -832,7 +891,7 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
   "Code to run when `cody-mode' is turned on in a buffer."
   (unless (cody--alive-p)
     (cody-login))
-  (cl-loop for (hook . func) in cody--buffer-local-hooks
+  (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil 'local))
   (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
   (force-mode-line-update t)
@@ -841,7 +900,7 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 (defun cody--mode-shutdown ()
   "Code to run when `cody-mode' is turned off in a buffer."
   (cody--completion-discard)
-  (cl-loop for (hook . func) in cody--buffer-local-hooks
+  (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func 'local))
   (cody--completion-cancel-timer)
   (setq cody-mode nil)) ; clears the modeline and buffer-locals
@@ -875,7 +934,7 @@ BEG and END are as per the contract of `before-change-functions'."
                      :old-content (buffer-substring-no-properties begin end)))))
     (error (cody--log "Error in `cody-before-change': %s" err))))
 
-(defun cody--after-change-function (begin end old-length)
+(defun cody--after-change (begin end old-length)
   "Notify the agent of a document contents change.
 BEGIN and END are the range of the changed text,
 OLD-LENGTH is the length of the pre-change text replaced by that range."
@@ -924,17 +983,20 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
   "Notify agent that a document has been focused or opened."
   (when (and cody-mode
              (eq window (selected-window)))
-    (let ((state (with-current-buffer (window-buffer window)
-                   cody--buffer-state)))
-      (cond
-       ((eq state 'active)
-        (cody--notify-document-did-focus))
-       ((null state)
-        (cody--notify-document-did-open)
-        (setq cody--buffer-state 'active))))
+    (cody--focus-or-open window)
     (if (cody--overlay-visible-p)
         (cody--completion-hide)
       (cody--completion-start-timer))))
+
+(defun cody--focus-or-open (window)
+  (let ((state (with-current-buffer (window-buffer window)
+                 cody--buffer-state)))
+    (cond
+     ((eq state 'active)
+      (cody--notify-document-did-focus))
+     ((null state)
+      (cody--notify-document-did-open)
+      (setq cody--buffer-state 'active)))))
 
 (defun cody--notify-document-did-open ()
   "Inform the agent that the current buffer's document just opened."
@@ -1202,11 +1264,13 @@ there is a connection."
   (interactive)
   (if (cody--alive-p)
       (unless quiet
-        (message "Cody agent is already started."))
+        (message "Cody active and ready. M-x `cody-dashboard' for details."))
     (setq cody--node-version-status nil) ; re-check node version on start
     (message "Initializing Cody connection...")
     (cody--connection)
-    (message "Cody connection initialized.")))
+    (message "Cody connection initialized."))
+  (when (cody--alive-p)
+    (cody--global-mode 1)))
 
 (defun cody-restart ()
   "Shut down and restart Cody."
@@ -1387,7 +1451,6 @@ Does syntactic smoke screens before requesting completion from Agent."
                    ;; Avoid spamming if the cursor hasn't moved.
                    (not (eql cursor cody--completion-last-trigger-spot))))
       (cody--completion-discard) ; Clears telemetry from previous request.
-      (cody--flush-pending-changes)
       (cody--completion-update-timestamp :triggeredAt)
       (setq cody--completion-last-trigger-spot cursor)
       (jsonrpc-async-request
@@ -1645,7 +1708,8 @@ If not, then it handles logging and messaging."
   (let ((verbose (or cody-completions-cycling-help-p
                      (and (called-interactively-p 'interactive)
                           (memq this-command
-                                '(cody-completion-cycle-next cody-completion-cycle-prev)))))
+                                '(cody-completion-cycle-next
+                                  cody-completion-cycle-prev)))))
         (cc (cody--cc)))
     (cl-labels ((explain (msg &rest args)
                   (let ((output (apply #'message msg args)))
@@ -1716,14 +1780,16 @@ If point is not at the overlay, dispatches to the default binding."
     (cody--execute-default-keybinding)))
 
 (defun cody--filtered-custom-variables (groups)
-  "Get all custom variables in the provided GROUPS, excluding those marked with `no-cody-dashboard`.
-Return an alist where each element is (GROUP . VARIABLES)."
+  "Get all custom variables in the provided GROUPS
+Excludes those marked with `no-cody-dashboard`.
+Returns an alist where each element is (GROUP . VARIABLES)."
   (cl-loop for group in groups
            collect (cons group
                          (cl-loop for symbol being the symbols
                                   when (and (custom-variable-p symbol)
                                             (not (get symbol 'no-cody-dashboard))
-                                            (string-prefix-p (symbol-name group) (symbol-name symbol)))
+                                            (string-prefix-p (symbol-name group)
+                                                             (symbol-name symbol)))
                                   collect symbol into vars
                                   finally return (sort vars #'string<)))))
 
@@ -1740,7 +1806,8 @@ Return an alist where each element is (GROUP . VARIABLES)."
                     (insert (propertize header 'face '(:underline t)))
                     (insert "\n"))
                   (ifield (label value &optional face)
-                    (insert (propertize (concat label ": ") 'face 'font-lock-builtin-face))
+                    (insert (propertize (concat label ": ")
+                                        'face 'font-lock-builtin-face))
                     (insert (propertize (concat value "\n") 'face face)))
                   (fbuf (buffer)
                     (setq buffer-read-only t)
@@ -1775,7 +1842,7 @@ Return an alist where each element is (GROUP . VARIABLES)."
                   (if (cody--server-info-cody-enabled cody--server-info)
                       'success 'error))
           (ifield "  Cody Version" (cody--server-info-cody-version
-                                  cody--server-info))
+                                    cody--server-info))
 
           (insert "\n")
           (isec "Auth Status")
@@ -1798,9 +1865,9 @@ Return an alist where each element is (GROUP . VARIABLES)."
                     (if (cody--auth-status-site-has-cody-enabled auth-status)
                         'success 'error))
             (ifield "  Site Version" (cody--auth-status-site-version
-                                        auth-status))
+                                      auth-status))
             (ifield "  Display Name" (cody--auth-status-display-name
-                                        auth-status))
+                                      auth-status))
             (let ((email (cody--auth-status-primary-email auth-status)))
               (ifield "  Primary Email" email 'font-lock-string-face))
             (insert "\n"))
@@ -1904,7 +1971,8 @@ Return an alist where each element is (GROUP . VARIABLES)."
 ;;; Event log
 
 (defvar cody-event-log-keywords
-  (let* ((x-keywords '("initialize" "initialized" "debug/message" "remoteRepo/didChange"))
+  (let* ((x-keywords '("initialize" "initialized"
+                       "debug/message" "remoteRepo/didChange"))
          (x-keywords-regexp (regexp-opt x-keywords 'words)))
     `((,x-keywords-regexp . font-lock-keyword-face))))
 

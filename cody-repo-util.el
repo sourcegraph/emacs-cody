@@ -21,33 +21,34 @@
 (require 'vc)
 (require 'vc-git)
 (require 'url-parse)
+(require 'url-util) ; For `url-hexify-string`
 
 (defun cody--uri-for (buffer-or-file)
   "Convert the BUFFER-OR-FILE to a URI string.
 Handles Windows drive letters and formats them appropriately.
 If BUFFER-OR-FILE is a buffer, retrieves its associated file name.
 Returns BUFFER-OR-FILE in case of errors or if conversion is not possible,
-or `buffer-name' as a last resort, to avoid sending a nil path to the agent."
+or `buffer-name` as a last resort, to avoid sending a nil path to the agent."
   (let* ((buffer (if (bufferp buffer-or-file) buffer-or-file (current-buffer)))
-         (file (or (when (bufferp buffer-or-file)
-                    (buffer-file-name buffer-or-file))
-                   buffer-or-file))
-         (file (or file (buffer-name buffer))))
+         (file (or (and (bufferp buffer-or-file) (buffer-file-name buffer-or-file))
+                   buffer-or-file
+                   (buffer-name buffer))))
     (condition-case err
-        (let* ((expanded (expand-file-name file))
-               (uri (if (file-remote-p expanded)
-                        expanded
-                      (concat "file:///"
-                              (replace-regexp-in-string
-                               (regexp-quote "/") "/"
-                               (url-hexify-string expanded))))))
-          ;; Handle Windows drive letters
-          (if (string-match "^file:///\\([a-zA-Z]\\):/" uri)
-              (let ((drive-letter (downcase (match-string 1 uri))))
-                (replace-match (concat "file:///" drive-letter "%3A/") t t uri))
-            uri))
+        (let* ((expanded (if (string-match "^[a-zA-Z]:" file)
+                             file
+                           (expand-file-name file)))
+               (normalized (replace-regexp-in-string "\\\\" "/" expanded)) ; Normalize Windows paths
+               (uri (if (file-remote-p normalized)
+                        normalized
+                      (concat "file://"
+                              (if (string-match "\\([a-zA-Z]\\):" normalized)
+                                  ;; Handle Windows drive letters
+                                  (concat "/" (downcase (match-string 1 normalized)) "%3A"
+                                          (substring normalized 2))
+                                normalized)))))
+          uri)
       (error
-       (cody--log "Error converting file to URI: %s" err)
+       (message "Error converting file to URI: %s" err)
        (buffer-name buffer)))))
 
 (defun cody--repo-info (project file)
