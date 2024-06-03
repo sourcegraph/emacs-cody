@@ -515,10 +515,10 @@ and the symbol `cody--status' will have an `error' property.")
 (defvar-local cody--buffer-state nil
   "The state of Cody in the current buffer.
 Can be any of nil, `active', `disabled', or `ignored'.
-If no, the buffer's state has not yet been evaluated.
-Disabled means it is not a buffer Cody is interested in,
-whereas ignored means that an admin has configured it
-to be excluded.")
+
+If nil, the buffer's state has not yet been evaluated.  Disabled means
+it is not a buffer Cody is interested in, whereas ignored means that an
+admin has configured it to be excluded.")
 
 (defvar cody-mode-menu)
 
@@ -534,13 +534,15 @@ to be excluded.")
   "Keymap for Cody mode line button.")
 
 (defvar-local cody--mode-line-icon-evaluator
-  '(:eval (condition-case err
-              (when cody-mode
-                (cl-case cody--buffer-state
-                  (active (cody--color-icon))
-                  (ignored (cody--ignored-icon))
-                  (otherwise (cody--monochrome-icon))))
-            (error (cody--log "Error in mode line evaluator: %s" err))))
+    '(:eval (condition-case err
+                (when cody-mode
+                  (let ((icon
+                         (cl-case cody--buffer-state
+                           (active (cody--color-icon))
+                           (ignored (cody--ignored-icon))
+                           (otherwise (cody--monochrome-icon)))))
+                    (cody--decorate-mode-line-lighter icon)))
+              (error (cody--log "Error in mode line evaluator: %s" err))))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
