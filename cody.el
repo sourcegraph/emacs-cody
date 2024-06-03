@@ -922,56 +922,44 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
        (derived-mode-p 'text-mode 'prog-mode)))
 
 (defun cody--before-change (beg end)
-  "Before the buffer is changed, remember the old contents.
-This is primarily so that we can detect when the user deleted
-whitespace backward before the point at the completion suggestion.
+  "Handle deletions, which are only visible before the change.
 BEG and END are as per the contract of `before-change-functions'."
-  (condition-case err
-      (when (cody--overlay-visible-p)
-        (save-restriction
-          (widen)
-          ;; Store the range and old content before the change.
-          (put 'cody--vars 'cody--before-change-state
-               (list :range (list :begin begin :end end)
-                     :old-content (buffer-substring-no-properties begin end)))))
-    (error (cody--log "Error in `cody-before-change': %s" err))))
+  (cody--handle-doc-change beg end 'deletion)
+  (when (cody--overlay-visible-p)
+    (without-restriction
+      ;; Store the range and old content from before the change.
+      (put 'cody--vars 'cody--before-change-state
+           (list :range (list :start beg :end end)
+                 :old-content (buffer-substring-no-properties beg end))))))
 
-(defun cody--after-change (begin end old-length)
+(defun cody--after-change (beg end old-length)
   "Notify the agent of a document contents change.
-BEGIN and END are the range of the changed text,
+BEG and END are the range of the changed text, where a deletion yields a 0 range.
 OLD-LENGTH is the length of the pre-change text replaced by that range."
-  (condition-case err
-      (progn
-        (save-restriction
-          (widen)
-          ;; Only proceed if the change was an insertion or deletion.
-          (when (or (not (= old-length 0)) (> (- end begin) 0))
-            (let* ((before-state (get 'cody--vars 'cody--before-change-state))
-                   (new-content (buffer-substring-no-properties begin end))
-                   (start-pos (plist-get (plist-get before-state :range) :begin))
-                   (old-content (plist-get before-state :old-content)))
-              (cody--notify 'textDocument/didChange
-                            (list
-                             :uri (cody--uri-for (buffer-file-name))
-                             :contentChanges
-                             (list
-                              (list
-                               :range (list :start (cody--position-from-offset start-pos)
-                                            :end (cody--position-from-offset begin))
-                               :rangeLength old-length
-                               :text new-content)))))))
-        (if (cody--overlay-visible-p)
-            ;; Either recompute or hide the overlay, based on the change.
-            (cody--handle-typing-while-suggesting beg end len)
-          (cody--completion-start-timer)))
-    (error (cody--log "Error in `cody-after-change': %s" err))))
+  ;; TODO: compare `old-length' to what we actually have in the buffer,
+  ;; to detect potential document desynchronization.
+  (cody--handle-doc-change beg end))
 
-(defun cody--position-from-offset (offset)
-  "Convert OFFSET to a Position struct."
-  (save-excursion
-    (goto-char offset)
-    (list :line (line-number-at-pos (point))
-          :character (current-column))))
+(defun cody--handle-doc-change (beg end &optional deletion-p)
+  (condition-case err
+      (unless (and deletion-p (= beg end)) ; don't send empty deletion ranges
+        (cody--notify-doc-did-change
+         beg end
+         (if deletion-p "" (without-restriction
+                             (buffer-substring-no-properties beg end))))
+        (when-let* ((before-state (get 'cody--vars 'cody--before-change-state))
+                    (range (plist-get before-state :range))
+                    (deleted-text (plist-get before-state :old-content))
+                    (before-beg (plist-get range :start))
+                    (before-end (plist-get range :end))
+                    (len (length deleted-text)))
+          (if (cody--overlay-visible-p)
+              ;; Either recompute or hide the overlay, based on the change.
+              (cody--handle-typing-while-suggesting before-beg before-end len)
+            (cody--completion-start-timer))))
+    (error
+     (let ((symbol (if deletion-p 'cody--before-change 'cody--after-change)))
+       (cody--log "Error in `%s': %s" symbol err)))))
 
 (defun cody--handle-doc-closed ()
   "Notify agent that the document has been closed."
@@ -995,12 +983,12 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
                  cody--buffer-state)))
     (cond
      ((eq state 'active)
-      (cody--notify-document-did-focus))
+      (cody--notify-doc-did-focus))
      ((null state)
-      (cody--notify-document-did-open)
+      (cody--notify-doc-did-open)
       (setq cody--buffer-state 'active)))))
 
-(defun cody--notify-document-did-open ()
+(defun cody--notify-doc-did-open ()
   "Inform the agent that the current buffer's document just opened."
   (cody--notify 'textDocument/didOpen
                 (list
@@ -1008,17 +996,38 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
                  :content (buffer-substring-no-properties (point-min) (point-max))
                  :selection (cody--selection-get-current (current-buffer)))))
 
-(defun cody--notify-document-did-focus ()
+(defun cody--notify-doc-did-focus ()
   "Inform the agent that the current buffer's document was just focusd."
   (cody--notify 'textDocument/didFocus
                 (list ; Don't include :content, as it didn't change.
                  :uri (cody--uri-for (buffer-file-name))
                  :selection (cody--selection-get-current (current-buffer)))))
 
+(defun cody--notify-doc-did-change (beg end text)
+  "Inform the agent that the current buffer's document changed."
+  (cody--notify 'textDocument/didChange
+                (list
+                 :uri (cody--uri-for (buffer-file-name))
+                 :selection (cody--selection-get-current (current-buffer))
+                 :contentChanges (list ; We only send 1 change at a time.
+                                  (list 
+                                   :range (list :start (cody--position-from-offset beg)
+                                                :end (cody--position-from-offset end))
+                                   :text text)))))
+
+(defun cody--position-from-offset (offset)
+  "Convert OFFSET to a protocol Position struct."
+  (save-excursion
+    (goto-char offset)
+    ;; The protocol uses 0-based line and column numbers.
+    (list :line (1- (line-number-at-pos (point)))
+          :character (current-column))))
+
 (defun cody--completion-start-timer ()
   "Set a cancellable timer to check for an automatic completion."
   ;; This is a debounce so we don't request one until they stop typing.
   ;; It requests immediately after they go idle.
+  ;; TODO: Try removing the timer and just call (cody--maybe-trigger-completion) here.
   (setq cody--completion-timer
         (run-with-idle-timer 0.05 nil #'cody--maybe-trigger-completion)))
 
@@ -1061,7 +1070,7 @@ Installed on `post-command-hook'."
 This can be called for either insertions or deletions, and we allow
 the completion suggestion overlay to remain active for certain instances
 of both. If it is a deletion, we recorded the deleted text in our
-before-change function.
+`cody--before-change' function.
 BEG and END are the region that changed, and LEN is its length."
   (condition-case err
       (if-let*
@@ -1292,6 +1301,11 @@ there is a connection."
   (with-current-buffer (get-buffer-create cody-log-buffer-name)
     (goto-char (point-max))
     (insert (apply #'format msg args) "\n")))
+
+(defun cody--clear-log ()
+  "Clear the *cody-log* debugging message buffer."
+  (with-current-buffer (get-buffer-create cody-log-buffer-name)
+    (erase-buffer)))
 
 ;;;###autoload
 (defun cody-chat ()
