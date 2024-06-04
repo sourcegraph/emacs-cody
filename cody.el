@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2023 Sourcegraph, Inc.
 
-;; Version: 0.1
+;; Version: 0.2
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; Maintainer: Steve Yegge <steve.yegge@gmail.com>
 ;; URL: https://github.com/sourcegraph/emacs-cody
@@ -2045,7 +2045,7 @@ Returns an alist where each element is (GROUP . VARIABLES)."
    0.1 nil
    (lambda ()
      (condition-case err
-         (progn
+         (let ((inhibit-read-only t))
            (with-current-buffer (get-buffer "*cody events*")
              (cody-event-log-mode)))
        (error (cody--log "Failed to activate cody-event-log-mode: %s"
