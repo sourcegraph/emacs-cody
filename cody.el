@@ -748,7 +748,7 @@ Returns a `cody-server-info' instance."
 (defun cody--async-request (method params &rest args)
   "Wrapper for `jsonrpc-async-request' that makes it testable."
   (unless cody--unit-testing-p
-    (apply #'jsonrpc-async-request method params args)))
+    (apply #'jsonrpc-async-request (cody-connection) method params args)))
 
 (defun cody--check-node-version ()
   "Signal an error if the default node.js version is too low.
@@ -924,42 +924,49 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 (defun cody--before-change (beg end)
   "Handle deletions, which are only visible before the change.
 BEG and END are as per the contract of `before-change-functions'."
-  (cody--handle-doc-change beg end 'deletion)
-  (when (cody--overlay-visible-p)
-    (without-restriction
-      ;; Store the range and old content from before the change.
-      (put 'cody--vars 'cody--before-change-state
-           (list :range (list :start beg :end end)
-                 :old-content (buffer-substring-no-properties beg end))))))
+  (condition-case err
+      (progn
+        (when (cody--overlay-visible-p)
+          (without-restriction
+            ;; Store the range and old content from before the change.
+            (put 'cody--vars 'cody--before-change-state
+                 (list :range (list :start beg :end end)
+                       :old-content (buffer-substring-no-properties beg end)))))
+        (when (< beg end) ; handle deletions only
+          (cody--on-doc-change beg end "")))
+    (error (cody--log "Error in ``cody--before-change: %s" err))))
 
 (defun cody--after-change (beg end old-length)
-  "Notify the agent of a document contents change.
-BEG and END are the range of the changed text, where a deletion yields a 0 range.
+  "Handle insertions, which are only visible after the change is applied.
+BEG and END are the range of the changed text; they are the same for deletions.
 OLD-LENGTH is the length of the pre-change text replaced by that range."
-  ;; TODO: compare `old-length' to what we actually have in the buffer,
-  ;; to detect potential document desynchronization.
-  (cody--handle-doc-change beg end))
-
-(defun cody--handle-doc-change (beg end &optional deletion-p)
   (condition-case err
-      (unless (and deletion-p (= beg end)) ; don't send empty deletion ranges
-        (cody--notify-doc-did-change
-         beg end
-         (if deletion-p "" (without-restriction
-                             (buffer-substring-no-properties beg end))))
-        (when-let* ((before-state (get 'cody--vars 'cody--before-change-state))
-                    (range (plist-get before-state :range))
-                    (deleted-text (plist-get before-state :old-content))
-                    (before-beg (plist-get range :start))
-                    (before-end (plist-get range :end))
-                    (len (length deleted-text)))
-          (if (cody--overlay-visible-p)
-              ;; Either recompute or hide the overlay, based on the change.
-              (cody--handle-typing-while-suggesting before-beg before-end len)
-            (cody--completion-start-timer))))
-    (error
-     (let ((symbol (if deletion-p 'cody--before-change 'cody--after-change)))
-       (cody--log "Error in `%s': %s" symbol err)))))
+      (when (< beg end) ; insert/replace
+        (cody--on-doc-change
+         ;; Although beg==end means deletions to Emacs here, the protocol
+         ;; expects beg==end for insertions, so we use beg for both:
+         beg beg
+         ;; The change has been applied, so we can get the inserted text.
+         (without-restriction
+           (buffer-substring-no-properties beg end))))
+    (error (cody--log "Error in `cody--after-change': %s" err))))
+
+(defun cody--on-doc-change (beg end text)
+  "Common code for `cody--before-change' and `cody--after-change'."
+  (cody--notify-doc-did-change beg end text)
+  (cody--recompute-or-hide-overlay))
+
+(defun cody--recompute-or-hide-overlay ()
+  ;; Either recompute or hide the overlay, based on the change.
+  (when-let* ((before-state (get 'cody--vars 'cody--before-change-state))
+              (range (plist-get before-state :range))
+              (deleted-text (plist-get before-state :old-content))
+              (before-beg (plist-get range :start))
+              (before-end (plist-get range :end))
+              (len (length deleted-text)))
+    (if (cody--overlay-visible-p)
+        (cody--handle-typing-while-suggesting before-beg before-end len)
+      (cody--completion-start-timer))))
 
 (defun cody--handle-doc-closed ()
   "Notify agent that the document has been closed."
@@ -1005,15 +1012,17 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
 
 (defun cody--notify-doc-did-change (beg end text)
   "Inform the agent that the current buffer's document changed."
-  (cody--notify 'textDocument/didChange
-                (list
-                 :uri (cody--uri-for (buffer-file-name))
-                 :selection (cody--selection-get-current (current-buffer))
-                 :contentChanges (list ; We only send 1 change at a time.
-                                  (list 
-                                   :range (list :start (cody--position-from-offset beg)
-                                                :end (cody--position-from-offset end))
-                                   :text text)))))
+  (let* ((uri (cody--uri-for (buffer-file-name)))
+         (selection (cody--selection-get-current (current-buffer)))
+         (content-change (list
+                          :range (list :start (cody--position-from-offset beg)
+                                       :end (cody--position-from-offset end))
+                          :text text))
+         (params (list
+                  :uri uri
+                  :selection selection
+                  :contentChanges (vector content-change))))
+    (jsonrpc-notify (cody--connection) 'textDocument/didChange params)))
 
 (defun cody--position-from-offset (offset)
   "Convert OFFSET to a protocol Position struct."
@@ -1304,6 +1313,7 @@ there is a connection."
 
 (defun cody--clear-log ()
   "Clear the *cody-log* debugging message buffer."
+  (interactive)
   (with-current-buffer (get-buffer-create cody-log-buffer-name)
     (erase-buffer)))
 
