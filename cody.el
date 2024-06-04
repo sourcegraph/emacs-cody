@@ -514,11 +514,12 @@ and the symbol `cody--status' will have an `error' property.")
 
 (defvar-local cody--buffer-state nil
   "The state of Cody in the current buffer.
-Can be any of nil, `active', `disabled', or `ignored'.
+Can be any of nil, `active', `inactive', or `ignored'.
 
-If nil, the buffer's state has not yet been evaluated.  Disabled means
-it is not a buffer Cody is interested in, whereas ignored means that an
-admin has configured it to be excluded.")
+If nil, the buffer's state has not yet been evaluated.  Inactive means
+its workspace is not currently live, so Cody is not tracking changes to
+the file nor using it for context. Ignored means that an admin has
+configured the file or repo to be excluded from Cody.")
 
 (defvar cody-mode-menu)
 
@@ -538,9 +539,10 @@ admin has configured it to be excluded.")
                 (when cody-mode
                   (let ((icon
                          (cl-case cody--buffer-state
-                           (active (cody--color-icon))
-                           (ignored (cody--ignored-icon))
-                           (otherwise (cody--monochrome-icon)))))
+                           (active (cody--icon-cody-logo-small))
+                           (inactive (cody--icon--logo-monotone))
+                           (ignored (cody--icon-logo-disabled))
+                           (otherwise nil))))
                     (cody--decorate-mode-line-lighter icon)))
               (error (cody--log "Error in mode line evaluator: %s" err))))
   "Descriptor for producing a custom menu in the mode line lighter.")
@@ -813,41 +815,54 @@ make it a reasonable root for the current project."
 
 ;;; Code for cody minor mode:
 
-;; TODO: Use the svgs; keep pngs for now.
-(defun cody-logo ()
-  "Return the Cody large logo image."
-  (or (get 'cody-logo 'cached-image)
-      (put 'cody-logo 'cached-image
-           (create-image (cody-logo-file "cody-logo.png")))))
-
-(defun cody-logo-small ()
-  "Return the Cody modeline image."
-  (or (get 'cody-logo-small 'cached-image)
-      (put 'cody-logo-small 'cached-image
-           (create-image (cody-logo-file "cody-logo-small.png")))))
-
-(defun cody--color-icon ()
-  "Return the color modeline icon."
-  (cody-logo-small))
-
-(defun cody--monochrome-icon ()
-  "Return the monochrome icon."
-  ;; TODO: Return dark or light logo based on theme
-  (cody-logo-small))
-
-(defun cody--ignored-icon ()
-  "Return the buffer-is-ignored icon."
-  ;; TODO: Return dark or light logo based on theme
-  (cody-logo-small))
-
 (defun cody-logo-file (file-base)
   "Construct path to bundled cody image file.
 Argument FILE-BASE is the file base name sans directory."
-  (file-name-concat ; hack the Cody logo path
-   ;; wtf emacs why is there no parent-directory function?
+  (file-name-concat
    (file-name-directory (directory-file-name
                          (file-name-directory cody--cody-agent)))
+   "icons"
    file-base))
+
+(defun cody-current-theme-dark-p ()
+  "Return t if the current theme is considered dark."
+  (eq (frame-parameter nil 'background-mode) 'dark))
+
+(defmacro define-cached-icon (base-name &optional dual-theme)
+  "Define a function that returns a cached image for BASE-NAME.
+This function considers the current theme (light or dark) and returns
+an appropriate version of the icon. If DUAL-THEME is non-nil,
+it indicates that the icon works for both light and dark themes."
+  (let* ((name (intern (format "cody--icon-%s" base-name)))
+         (light-filename (concat base-name ".png"))
+         (dark-filename (if dual-theme
+                            (concat base-name ".png")
+                          (concat base-name "_dark.png"))))
+    `(defun ,name ()
+       (let ((file (if (cody-current-theme-dark-p) ,dark-filename ,light-filename)))
+         (or (get ',name 'cached-image)
+             (put ',name 'cached-image
+                  (create-image (cody-logo-file file))))))))
+
+(defmacro create-icon-functions ()
+  "Create functions for all necessary icons in the icons directory."
+  (let ((theme-dependent-icons '("logo-disabled"
+                                 "logo-monotone"))
+        (fixed-icons '("cody-logo-small"
+                       "cody-logo"
+                       "logo-mono-unavailable")))
+    `(progn
+       ;; Generate functions for theme-dependent icons
+       ,@(mapcar (lambda (name)
+                   `(define-cached-icon ,name))
+                 theme-dependent-icons)
+       ;; Generate functions for fixed icons
+       ,@(mapcar (lambda (name)
+                   `(define-cached-icon ,name t))
+                 fixed-icons))))
+
+;; Execute the macro to create the necessary functions
+(create-icon-functions)
 
 (defun cody--mode-line-click (_event)
   "Handle mouse click EVENT on Cody mode line item."
@@ -895,6 +910,7 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
     (cody-login))
   (cl-loop for (hook . func) in cody--mode-hooks
            do (add-hook hook func nil 'local))
+  (cody--buffer-init-state)
   (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
   (force-mode-line-update t)
   (cody--handle-focus-changed (selected-window)))
@@ -919,7 +935,12 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 (defun cody--should-enable-cody-p (buffer)
   "Check if Cody mode should be enabled in BUFFER."
   (and buffer-file-name ; TODO: support untitled documents
-       (derived-mode-p 'text-mode 'prog-mode)))
+       (with-current-buffer buffer
+         (derived-mode-p 'text-mode 'prog-mode))))
+
+(defun cody--mode-active-p ()
+  "Return non-nil if `cody-mode' is enabled and `cody--buffer-state' is `active'."
+  (and cody-mode (eq cody--buffer-state 'active)))
 
 (defun cody--before-change (beg end)
   "Handle deletions, which are only visible before the change.
@@ -953,8 +974,9 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
 
 (defun cody--on-doc-change (beg end text)
   "Common code for `cody--before-change' and `cody--after-change'."
-  (cody--notify-doc-did-change beg end text)
-  (cody--recompute-or-hide-overlay))
+  (when (cody--mode-active-p)
+    (cody--notify-doc-did-change beg end text)
+    (cody--recompute-or-hide-overlay)))
 
 (defun cody--recompute-or-hide-overlay ()
   ;; Either recompute or hide the overlay, based on the change.
@@ -978,22 +1000,37 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
 
 (defun cody--handle-focus-changed (window)
   "Notify agent that a document has been focused or opened."
-  (when (and cody-mode
+  (when (and (cody--mode-active-p)
              (eq window (selected-window)))
-    (cody--focus-or-open window)
+    (cody--focus-or-open)
     (if (cody--overlay-visible-p)
         (cody--completion-hide)
       (cody--completion-start-timer))))
 
-(defun cody--focus-or-open (window)
-  (let ((state (with-current-buffer (window-buffer window)
-                 cody--buffer-state)))
-    (cond
-     ((eq state 'active)
-      (cody--notify-doc-did-focus))
-     ((null state)
-      (cody--notify-doc-did-open)
-      (setq cody--buffer-state 'active)))))
+(defun cody--focus-or-open ()
+  "When a document is focused, notify the agent.
+Current buffer is visiting the document."
+  (let* ((state cody--buffer-state)
+         (old-state (cody--buffer-init-state))
+         (already-open (eq state 'active))) ; see if state changed
+    (when (eq old-state 'active)
+      (if already-open
+          (cody--notify-doc-did-focus)
+        (cody--notify-doc-did-open)))))
+
+(defun cody--buffer-init-state ()
+  "Initialize `cody--buffer-state' for the current buffer.
+Return value is the previous value of `cody--buffer-state'."
+  ;; Until we get multiple workspaces supported in the agent, only make
+  ;; Cody "active" in files under the current workspace root.
+  (let ((uri (cody--uri-for (current-buffer)))
+        (workspace-uri (cody--uri-for (cody--workspace-root)))
+        (old-state cody--buffer-state))
+    (setq cody--buffer-state (if (and uri
+                                      (string-prefix-p workspace-uri uri))
+                                 'active
+                               'inactive))
+    old-state))
 
 (defun cody--notify-doc-did-open ()
   "Inform the agent that the current buffer's document just opened."
@@ -1022,7 +1059,7 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
                   :uri uri
                   :selection selection
                   :contentChanges (vector content-change))))
-    (jsonrpc-notify (cody--connection) 'textDocument/didChange params)))
+    (cody--notify 'textDocument/didChange params)))
 
 (defun cody--position-from-offset (offset)
   "Convert OFFSET to a protocol Position struct."
@@ -1143,7 +1180,7 @@ Optional argument METHOD is the agent protocol method with PARAMS."
 (defun cody--kill-buffer-function ()
   "If we are killing the last buffer visiting this file, notify agent."
   (condition-case err
-      (when (and cody-mode
+      (when (and (cody--mode-active-p)
                  buffer-file-name
                  (cody--last-buffer-for-file-p))
         (cody--notify 'textDocument/didClose
@@ -1347,14 +1384,14 @@ Query and output go into the *cody-chat* buffer."
       (with-current-buffer (get-buffer-create cody--chat-buffer-name)
         (buffer-disable-undo)
         (let ((inhibit-modification-hooks t))
-          (insert-image (cody-logo) "Cody")
+          (insert-image (cody--icon-cody-logo) "Cody")
           (insert "Welcome to Cody. Type `M-x cody-help` for more info.\n")
           (set-buffer-modified-p nil))
         (current-buffer)))))
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (when cody-mode
+  (when (cody--mode-active-p)
     (when-let ((o (car-safe cody--overlay-deltas)))
       (and (overlayp o)
            (overlay-buffer o) ; overlay is positioned/visible somewhere
@@ -1435,8 +1472,8 @@ Also calls the default key binding."
 
 (defun cody--maybe-trigger-completion ()
   "Possibly trigger an immediate automatic completion request."
-  (when (and cody-mode
-             cody-completions-auto-trigger-p
+  (when (and cody-completions-auto-trigger-p
+             (cody--mode-active-p)
              (not (cody--overlay-visible-p))
              (not (use-region-p))
              (cody--completion-syntactically-eligible-p))
@@ -1464,7 +1501,7 @@ Does syntactic smoke screens before requesting completion from Agent."
 (defun cody-request-completion ()
   "Request manual autocompletion in current buffer at point."
   (interactive)
-  (unless cody-mode
+  (unless (cody--mode-active-p)
     (error "Cody-mode not enabled in this buffer."))
   (let* ((buf (current-buffer))
          (line (1- (line-number-at-pos)))
@@ -1638,7 +1675,7 @@ Returns nil if the text does not pass the sanitizing checks."
     (condition-case err
         (let* ((text (or (overlay-get ovl 'after-string) ""))
                (ends-in-newline (string-match-p "\n\\'" text))
-               (marker (propertize " " 'display (cody-logo-small)))
+               (marker (propertize " " 'display (cody--icon-cody-logo-small)))
                ;; Make sure it precedes any trailing \n, to stay on line.
                (text-with-marker (if ends-in-newline
                                      (concat (substring text 0 -1) marker "\n")
