@@ -379,6 +379,15 @@ Sends this flag as part of the agent extension configuration."
   :group 'cody-dev
   :type 'boolean)
 
+(defcustom cody--dev-panic-on-doc-desync nil
+  "Non-nil to ask the Agent to panic if we discover it is desynced.
+De-syncing is when the Agent's copy of a document is out of sync with
+the actual document in Emacs. Setting this customn variable to non-nil,
+which should only be done in development, sends extra metadata along
+with document changes, which the Agent will compare against."
+  :group 'cody-dev
+  :type 'boolean)
+
 (defconst cody--defgroups '(cody cody-completions cody-dev)
   "List of Cody-related `defgroup's to include in `cody-dashboard'.")
 
@@ -565,6 +574,10 @@ configured the file or repo to be excluded from Cody.")
 (defsubst cody--eol ()
   "Alias for `line-end-position'."
   (line-beginning-position))
+
+(defsubst cody--buffer-string ()
+  "Return the entire current buffer's contents as a string."
+  (buffer-substring-no-properties (point-min) (point-max)))
 
 (defsubst cody--convert-json-false (val)
   "Convert JSON false (:json-false) to nil. Leave other values unchanged."
@@ -1038,19 +1051,19 @@ Return value is the previous value of `cody--buffer-state'."
                 (list
                  :uri (cody--uri-for (buffer-file-name))
                  :content (buffer-substring-no-properties (point-min) (point-max))
-                 :selection (cody--selection-get-current (current-buffer)))))
+                 :selection (cody--selection-get-current))))
 
 (defun cody--notify-doc-did-focus ()
   "Inform the agent that the current buffer's document was just focusd."
   (cody--notify 'textDocument/didFocus
                 (list ; Don't include :content, as it didn't change.
                  :uri (cody--uri-for (buffer-file-name))
-                 :selection (cody--selection-get-current (current-buffer)))))
+                 :selection (cody--selection-get-current))))
 
 (defun cody--notify-doc-did-change (beg end text)
   "Inform the agent that the current buffer's document changed."
   (let* ((uri (cody--uri-for (buffer-file-name)))
-         (selection (cody--selection-get-current (current-buffer)))
+         (selection (cody--selection-get-current))
          (content-change (list
                           :range (list :start (cody--position-from-offset beg)
                                        :end (cody--position-from-offset end))
@@ -1059,6 +1072,14 @@ Return value is the previous value of `cody--buffer-state'."
                   :uri uri
                   :selection selection
                   :contentChanges (vector content-change))))
+    (when cody--dev-panic-on-doc-desync
+      (setq params (plist-put params :testing
+                              (list :selectedText selection
+                                    :sourceOfTruthDocument
+                                    (list
+                                     :uri uri
+                                     :selection selection
+                                     :content (cody--buffer-string))))))
     (cody--notify 'textDocument/didChange params)))
 
 (defun cody--position-from-offset (offset)
@@ -1083,12 +1104,14 @@ Return value is the previous value of `cody--buffer-state'."
     (cancel-timer cody--completion-timer)
     (setq cody--completion-timer nil)))
 
-(defun cody--selection-get-current (buf)
+(defun cody--selection-get-current (&optional buf)
   "Return the jsonrpc parameters representing the selection in BUF.
+Uses current buffer if BUF is nil.
 If the region is not active, the selection is zero-width at point.
 BUF can be a buffer or buffer name, and we return a Range with `start'
 and `end' parameters, each a Position of 1-indexed `line' and `character'.
 The return value is appropiate for sending directly to the rpc layer."
+  (or buf (setq buf (current-buffer)))
   (cl-flet ((pos-parameters (pos)
               ;; agent protocol range line/char are always 0-indexed
               (list :line (1- (line-number-at-pos pos))
