@@ -731,7 +731,7 @@ Returns a `cody-server-info' instance."
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
   (list :anonymousUserID (cody--internal-anonymized-uuid)
-        :serverEndpoint (concat "https://" cody--sourcegraph-host)
+        :serverEndpoint (concat "https://" cody--sourcegraph-host "/")
         :accessToken (cody--access-token)
         :debug cody--dev-enable-agent-debug-p
         :debug-verbose cody--dev-enable-agent-debug-verbose-p
@@ -860,7 +860,8 @@ it indicates that the icon works for both light and dark themes."
 (defmacro create-icon-functions ()
   "Create functions for all necessary icons in the icons directory."
   (let ((theme-dependent-icons '("logo-disabled"
-                                 "logo-monotone"))
+                                 "logo-monotone"
+                                 "error"))
         (fixed-icons '("cody-logo-small"
                        "cody-logo"
                        "logo-mono-unavailable")))
