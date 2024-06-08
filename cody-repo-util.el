@@ -31,7 +31,7 @@ Returns BUFFER-OR-FILE in case of errors or if conversion is not possible,
 or `buffer-name` as a last resort, to avoid sending a nil path to the agent."
   (let* ((buffer (if (bufferp buffer-or-file) buffer-or-file (current-buffer)))
          (file (or (and (bufferp buffer-or-file) (buffer-file-name buffer-or-file))
-                   buffer-or-file
+                   (when (stringp buffer-or-file) buffer-or-file)
                    (buffer-name buffer))))
     (condition-case err
         (let* ((expanded (if (string-match "^[a-zA-Z]:" file)
