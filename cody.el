@@ -543,17 +543,21 @@ configured the file or repo to be excluded from Cody.")
     map)
   "Keymap for Cody mode line button.")
 
+(defun cody--compute-logo-height ()
+  "Compute the desired height for the Cody logo as 85% of the mode line height."
+  (truncate (* 0.85 (frame-char-height))))
+
 (defvar-local cody--mode-line-icon-evaluator
-    '(:eval (condition-case err
-                (when cody-mode
-                  (let ((icon
-                         (cl-case cody--buffer-state
-                           (active (cody--icon-cody-logo-small))
-                           (inactive (cody--icon--logo-monotone))
-                           (ignored (cody--icon-logo-disabled))
-                           (otherwise nil))))
-                    (cody--decorate-mode-line-lighter icon)))
-              (error (cody--log "Error in mode line evaluator: %s" err))))
+  '(:eval (condition-case err
+              (when cody-mode
+                (let ((icon
+                       (cl-case cody--buffer-state
+                         (active (cody--icon-cody-logo-small))
+                         (inactive (cody--icon-logo-monotone))
+                         (ignored (cody--icon-logo-disabled))
+                         (otherwise nil))))
+                  (cody--decorate-mode-line-lighter icon)))
+            (error (cody--log "Error in mode line evaluator: %s" err))))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
@@ -828,7 +832,7 @@ make it a reasonable root for the current project."
 
 ;;; Code for cody minor mode:
 
-(defun cody-logo-file (file-base)
+(defun cody--logo-file (file-base)
   "Construct path to bundled cody image file.
 Argument FILE-BASE is the file base name sans directory."
   (file-name-concat
@@ -852,10 +856,12 @@ it indicates that the icon works for both light and dark themes."
                             (concat base-name ".png")
                           (concat base-name "_dark.png"))))
     `(defun ,name ()
-       (let ((file (if (cody-current-theme-dark-p) ,dark-filename ,light-filename)))
-         (or (get ',name 'cached-image)
-             (put ',name 'cached-image
-                  (create-image (cody-logo-file file))))))))
+       (let* ((file (if (cody-current-theme-dark-p) ,dark-filename ,light-filename))
+              (img (or (get ',name 'cached-image)
+                       (put ',name 'cached-image
+                            (create-image (cody--logo-file file))))))
+         (plist-put (cdr img) :height (cody--compute-logo-height))
+         img))))
 
 (defmacro create-icon-functions ()
   "Create functions for all necessary icons in the icons directory."
@@ -886,11 +892,15 @@ it indicates that the icon works for both light and dark themes."
 (defun cody-propertize-icon (text-or-image)
   "Return propertized string or image for `cody--minor-mode-icon`.
 Argument TEXT-OR-IMAGE is the string or image to propertize."
-  (propertize (if (stringp text-or-image) text-or-image " ")
-              'display (if (stringp text-or-image) nil text-or-image)
-              'help-echo "Cody mode - click for menu"
-              'mouse-face 'mode-line-highlight
-              'keymap cody-mode-line-map))
+  (let ((buffer-state (buffer-local-value 'cody--buffer-state (current-buffer)))
+        (help-echo (if cody--buffer-state
+                       (format "Cody mode (%s) - click for menu" cody--buffer-state)
+                     "Cody mode - click for menu")))
+    (propertize (if (stringp text-or-image) text-or-image " ")
+                'display (if (stringp text-or-image) nil text-or-image)
+                'help-echo help-echo
+                'mouse-face 'mode-line-highlight
+                'keymap cody-mode-line-map)))
 
 (defun cody--decorate-mode-line-lighter (image)
   "Use the passed IMAGE for the mode line lighter."
