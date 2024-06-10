@@ -1,4 +1,4 @@
-;;; cody-tests.el --- Tests for Emacs-Cody -*- lexical-binding: t; -*-
+;;; cody-unit-tests.el --- Tests for Emacs-Cody -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 Sourcegraph, Inc.
 
@@ -241,5 +241,5 @@ int main() {
                  42))))
 
 
-(provide 'cody-tests)
-;;; cody-tests.el ends here
+(provide 'cody-unit-tests)
+;;; cody-unit-tests.el ends here

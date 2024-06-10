@@ -3,3 +3,4 @@
 dist/index.js.map
 dist/*.exe
 dist/*.wasm
+.eask/

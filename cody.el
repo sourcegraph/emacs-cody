@@ -2,11 +2,12 @@
 
 ;; Copyright (C) 2023 Sourcegraph, Inc.
 
-;; Version: 0.2
+;; Version: 0.2.0
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; Maintainer: Steve Yegge <steve.yegge@gmail.com>
 ;; URL: https://github.com/sourcegraph/emacs-cody
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "1.2"))
+;; Keywords: completion convenience languages programming tools
 
 ;;; Commentary:
 ;;
