@@ -69,7 +69,7 @@ followed by the hook functions."
 ;; It would have been nice to support multiple tests per file, as erts does.
 ;; But I wasn't able to get my own code scoped in the Code: blocks. This winds
 ;; up being pretty clean, though, with the erts tests in their own subdirectory.
-(defmacro def-cody-doc-sync-test (relative-path &rest body)
+(defmacro def-cody-doc-sync-erts-test (relative-path &rest body)
   "Define a Cody document synchronization test.
 RELATIVE-PATH is the relative path to the test file.
 BODY is the code to evaluate during the test."
@@ -115,7 +115,7 @@ BODY is the code to evaluate during the test."
                   temp-file
                   (lambda () ,@body)))))))))))
 
-(put 'def-cody-doc-sync-test 'lisp-indent-function 1)
+(put 'def-cody-doc-sync-erts-test 'lisp-indent-function 1)
 
 (defmacro cody--test-with-transform (edit-body)
   "Macro to simplify writing transform functions.

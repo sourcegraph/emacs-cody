@@ -1,8 +1,7 @@
-;;; cody-doc-sync-test.el --- Tests for Cody document synchronization -*- lexical-binding: t; -*-
+;;; cody-doc-sync-ert-tests.el --- Tests for Cody document synchronization -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;; This file contains tests for the Cody document synchronization functionality.
-;; It leverages erts files for defining and running the tests.
 
 ;;; Code:
 
@@ -24,44 +23,44 @@
  :before-all 'cody-doc-sync-before-all
  :after-all 'cody-doc-sync-after-all)
 
-(def-cody-doc-sync-test "erts/doc-sync-insert-char.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-insert-char.erts"
   (insert "!"))
 
-(def-cody-doc-sync-test "erts/doc-sync-delete-char.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-delete-char.erts"
   (delete-char 1))
 
-(def-cody-doc-sync-test "erts/doc-sync-delete-range.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-delete-range.erts"
   (kill-word 3))
 
-(def-cody-doc-sync-test "erts/doc-sync-replace-range-atomic.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-replace-range-atomic.erts"
   (replace-string "System.out.println" "console.log"))
 
-(def-cody-doc-sync-test "erts/doc-sync-replace-range-nonatomic.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-replace-range-nonatomic.erts"
   (kill-word 3)
   (insert "console.log"))
 
-(def-cody-doc-sync-test "erts/doc-sync-insert-with-newlines.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-insert-with-newlines.erts"
   (insert "\n  System.out.println(\"this is a test\")")
   (insert "\n  System.out.println(\"hello hello\")"))
 
-(def-cody-doc-sync-test "erts/doc-sync-erase-document.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-erase-document.erts"
   (delete-region (point-min) (point-max)))
 
-(def-cody-doc-sync-test "erts/doc-sync-append-to-end.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-append-to-end.erts"
   (goto-char (point-max))
   (insert "// antidisestablishmentarianism\n")
   (insert "// pneumonoultramicroscopicsilicovolcanoconiosis\n"))
 
-(def-cody-doc-sync-test "erts/doc-sync-delete-with-newlines.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-delete-with-newlines.erts"
   (delete-region (point)
                  (save-excursion
                    (forward-line 3)
                    (1- (point)))))
 
-(def-cody-doc-sync-test "erts/doc-sync-insert-emojis.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-insert-emojis.erts"
   (insert "!🎉🎂\n🥳🎈"))
 
-(def-cody-doc-sync-test "erts/doc-sync-multiple-edits.erts"
+(def-cody-doc-sync-erts-test "erts/doc-sync-multiple-edits.erts"
   (goto-char (point-min))
   (insert "import com.foo.Bar;\n\n")
   (search-forward "{\n")
@@ -73,5 +72,5 @@
   (goto-char (point-max))
   (insert "// end class Foo\n"))
 
-(provide 'cody-doc-sync-test)
-;;; cody-doc-sync-test.el ends here
+(provide 'cody-doc-sync-ert-tests)
+;;; cody-doc-sync-ert-tests.el ends here
