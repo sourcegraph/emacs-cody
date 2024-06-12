@@ -6,7 +6,7 @@
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; Maintainer: Steve Yegge <steve.yegge@gmail.com>
 ;; URL: https://github.com/sourcegraph/emacs-cody
-;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "1.2"))
+;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "20240201.2318"))
 ;; Keywords: completion convenience languages programming tools
 
 ;;; Commentary:
@@ -414,7 +414,11 @@ You can call `cody-restart' to force it to re-check the version.")
   "Set to non-nil during unit testing.
 When testing, all calls to the agent are diverted.")
 
-(defvar cody--connection nil "Global jsonrpc connection to Agent.")
+(defvar cody--integration-testing-p nil
+  "Set to non-nil during integration tests.
+When testing, the calls go through to the LLM.")
+
+(defvar cody--connection nil "Main jsonrpc connection to Agent.")
 
 (defvar cody--server-info nil
   "ServerInfo struct sent from the `initialize' handshake.")
@@ -524,12 +528,13 @@ and the symbol `cody--status' will have an `error' property.")
 
 (defvar-local cody--buffer-state nil
   "The state of Cody in the current buffer.
-Can be any of nil, `active', `inactive', or `ignored'.
+Can be any of nil, `active', `inactive', 'error', or `ignored'.
 
 If nil, the buffer's state has not yet been evaluated.  Inactive means
 its workspace is not currently live, so Cody is not tracking changes to
 the file nor using it for context. Ignored means that an admin has
-configured the file or repo to be excluded from Cody.")
+configured the file or repo to be excluded from Cody. The `error' state
+usually means communication with the backend is down.")
 
 (defvar cody-mode-menu)
 
@@ -555,6 +560,7 @@ configured the file or repo to be excluded from Cody.")
                        (cl-case cody--buffer-state
                          (active (cody--icon-cody-logo-small))
                          (inactive (cody--icon-logo-monotone))
+                         (error (cody--icon-logo-disabled))
                          (ignored (cody--icon-logo-disabled))
                          (otherwise nil))))
                   (cody--decorate-mode-line-lighter icon)))
@@ -597,7 +603,13 @@ configured the file or repo to be excluded from Cody.")
 
 (defun cody--agent-command ()
   "Command and arguments for running agent."
-  (list (or cody--dev-node-executable "node") cody--cody-agent))
+  (let ((node-executable (or cody--dev-node-executable (executable-find "node"))))
+    (unless node-executable
+      (error "Node.js executable not found in exec-path"))
+    (list node-executable
+          "--inspect"
+          "--enable-source-maps"
+          cody--cody-agent)))
 
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;   machine `cody--sourcegraph-host' login apikey password sgp_SECRET
@@ -626,6 +638,21 @@ configured the file or repo to be excluded from Cody.")
 (defun cody--connection ()
   "Return the agent process, starting one if it is not already running."
   (unless (cody--alive-p)
+    (setq cody--status 'disconnected)
+    (cody--connection-create-process)
+    (if (cody--alive-p)
+        (progn
+          (activate-cody-event-log-mode)
+          (cody--initialize-connection))
+      (cody--log "Failed to start cody agent process: %s" cody--connection)
+      (setq cody--connection nil)))
+  cody--connection)
+
+(defun cody--connection-create-process ()
+  "Create a local or network process for talking to the agent.
+Sets the `cody--connection' variable to the resulting process,
+and returns it."
+  (let ((process-environment (cody--agent-process-environment)))
     (setq cody--connection
           (make-instance
            'jsonrpc-process-connection
@@ -646,10 +673,14 @@ configured the file or repo to be excluded from Cody.")
               :coding 'utf-8-emacs-unix
               :connection-type 'pipe
               :stderr (get-buffer-create "*cody stderr*")
-              :noquery t))))
-    (activate-cody-event-log-mode)
-    (cody--initialize-connection))
-  cody--connection)
+              :noquery t))))))
+
+(defun cody--agent-process-environment ()
+  "Return the environment variables to set in the Agent."
+  (list
+    (format "PATH=%s" (getenv "PATH")) ; Propagate PATH
+    (concat "CODY_CLIENT_INTEGRATION_TESTING="
+            (if cody--integration-testing-p "true" "false"))))
 
 (defun cody-populate-server-info (response)
   "Populate the ServerInfo instance from the RESPONSE.
@@ -732,7 +763,6 @@ Returns a `cody-server-info' instance."
         :untitledDocuments "enabled"
         :progressBars "none"))
 
-
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
   (list :anonymousUserID (cody--internal-anonymized-uuid)
@@ -740,13 +770,27 @@ Returns a `cody-server-info' instance."
         :accessToken (cody--access-token)
         :debug cody--dev-enable-agent-debug-p
         :debug-verbose cody--dev-enable-agent-debug-verbose-p
-        :codebase (cody--workspace-root)
+        :codebase (cody--uri-for (cody--workspace-root))
         :customConfiguration (list (cons :cody.experimental.foldingRanges
                                          "indentation-based"))))
 
 (defun cody--notify-configuration-changed ()
   "Notify the agent that the extension configuration has changed."
-  (message "TODO"))
+  (let ((auth-status
+         (cody--request 'extensionConfiguration/change
+                        (cody--extension-configuration))))
+    (unless (plist-get auth-status :authenticated)
+      (cody--log "Cody is no longer authenticated after config change: %s"
+                 auth-status)
+      (message "Cody needs to re-authenticate")
+      (cody-logout))))
+
+(defun cody--set-workspace-root (new-root)
+  "Instruct the Agent to switch to NEW-ROOT as its workspace.
+NEW-ROOT is an absolute path to a directory containing the workspace.
+This discards all mirrored documents from the previous workspace."
+  (setq cody-workspace-root new-root)
+  (cody--notify-configuration-changed))
 
 (defun cody--set-error (msg &optional err)
   "Sets the plugin into an error state with MSG and ERR."
@@ -768,7 +812,7 @@ Returns a `cody-server-info' instance."
 (defun cody--async-request (method params &rest args)
   "Wrapper for `jsonrpc-async-request' that makes it testable."
   (unless cody--unit-testing-p
-    (apply #'jsonrpc-async-request (cody-connection) method params args)))
+    (apply #'jsonrpc-async-request (cody--connection) method params args)))
 
 (defun cody--check-node-version ()
   "Signal an error if the default node.js version is too low.
@@ -933,12 +977,15 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
   "Code to run when `cody-mode' is turned on in a buffer."
   (unless (cody--alive-p)
     (cody-login))
-  (cl-loop for (hook . func) in cody--mode-hooks
-           do (add-hook hook func nil 'local))
-  (cody--buffer-init-state)
-  (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
-  (force-mode-line-update t)
-  (cody--handle-focus-changed (selected-window)))
+  (when (cody--alive-p)
+    (cl-loop for (hook . func) in cody--mode-hooks
+             do (add-hook hook func nil 'local))
+    (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
+    (force-mode-line-update t)
+    ;; This initializes the state and needs to be called first.
+    (cody--handle-focus-changed (selected-window)))
+  ;; This chooses an appropriate mode-line icon.
+  (cody--buffer-init-state))
 
 (defun cody--mode-shutdown ()
   "Code to run when `cody-mode' is turned off in a buffer."
@@ -954,12 +1001,14 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 
 (defun cody--turn-on-if-applicable ()
   "Turn on `cody-mode' in this buffer if it satisfies the preconditions."
-  (when (cody--should-enable-cody-p (current-buffer))
+  (when (cody--should-auto-enable-cody-p (current-buffer))
     (cody-mode 1)))
 
-(defun cody--should-enable-cody-p (buffer)
-  "Check if Cody mode should be enabled in BUFFER."
+(defun cody--should-auto-enable-cody-p (buffer)
+  "Check if Cody mode should be automatically enabled in BUFFER."
   (and buffer-file-name ; TODO: support untitled documents
+       ;; Don't automatically turn on in buffers during integration testing.
+       (not cody--integration-testing-p)
        (with-current-buffer buffer
          (derived-mode-p 'text-mode 'prog-mode))))
 
@@ -1025,37 +1074,39 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
 
 (defun cody--handle-focus-changed (window)
   "Notify agent that a document has been focused or opened."
-  (when (and (cody--mode-active-p)
-             (eq window (selected-window)))
+  ;; N.B. Don't check `cody--mode-active-p' here, as it causes tests to fail.
+  ;; We can safely assume that we're only called when `cody-mode' is active.
+  (when (eq window (selected-window))
     (cody--focus-or-open)
     (if (cody--overlay-visible-p)
         (cody--completion-hide)
       (cody--completion-start-timer))))
 
 (defun cody--focus-or-open ()
-  "When a document is focused, notify the agent.
-Current buffer is visiting the document."
-  (let* ((state cody--buffer-state)
-         (old-state (cody--buffer-init-state))
-         (already-open (eq state 'active))) ; see if state changed
-    (when (eq old-state 'active)
+  "Initialize the state, and decide whether to tell agent doc focused or opened.
+Current buffer is visiting the document under consideration."
+  (let* ((old-state cody--buffer-state)
+         (new-state (cody--buffer-init-state))
+         (already-open (eq old-state new-state)))
+    (when (eq new-state 'active)
       (if already-open
           (cody--notify-doc-did-focus)
         (cody--notify-doc-did-open)))))
 
 (defun cody--buffer-init-state ()
   "Initialize `cody--buffer-state' for the current buffer.
-Return value is the previous value of `cody--buffer-state'."
-  ;; Until we get multiple workspaces supported in the agent, only make
-  ;; Cody "active" in files under the current workspace root.
-  (let ((uri (cody--uri-for (current-buffer)))
-        (workspace-uri (cody--uri-for (cody--workspace-root)))
-        (old-state cody--buffer-state))
-    (setq cody--buffer-state (if (and uri
-                                      (string-prefix-p workspace-uri uri))
-                                 'active
-                               'inactive))
-    old-state))
+Returns the new value."
+  (let ((alive (cody--alive-p))
+        (uri (cody--uri-for (current-buffer)))
+        (workspace-uri (cody--uri-for (cody--workspace-root))))
+    (setq cody--buffer-state
+          (cond
+           ((not alive) 'error)
+           ;; Until we get multiple workspaces supported, only make
+           ;; Cody "active" in files under the current workspace root.
+           ((and uri (string-prefix-p workspace-uri uri))
+            'active)
+           (t 'inactive)))))
 
 (defun cody--notify-doc-did-open ()
   "Inform the agent that the current buffer's document just opened."
@@ -1073,7 +1124,8 @@ Return value is the previous value of `cody--buffer-state'."
                  :selection (cody--selection-get-current))))
 
 (defun cody--notify-doc-did-change (beg end text)
-  "Inform the agent that the current buffer's document changed."
+  "Inform the agent that the current buffer's document changed.
+This is a synchronous call that suspends the caller until it completes."
   (let* ((uri (cody--uri-for (buffer-file-name)))
          (selection (cody--selection-get-current))
          (content-change (list
@@ -1092,7 +1144,9 @@ Return value is the previous value of `cody--buffer-state'."
                                      :uri uri
                                      :selection selection
                                      :content (cody--buffer-string))))))
-    (cody--notify 'textDocument/didChange params)))
+    (let ((result (cody--request 'textDocument/change params)))
+      (unless (plist-get result :success)
+        (cody--log "Failed to apply textDocument/change request: %s" result)))))
 
 (defun cody--position-from-offset (offset)
   "Convert OFFSET to a protocol Position struct."
@@ -1107,8 +1161,9 @@ Return value is the previous value of `cody--buffer-state'."
   ;; This is a debounce so we don't request one until they stop typing.
   ;; It requests immediately after they go idle.
   ;; TODO: Try removing the timer and just call (cody--maybe-trigger-completion) here.
-  (setq cody--completion-timer
-        (run-with-idle-timer 0.05 nil #'cody--maybe-trigger-completion)))
+  (when cody-completions-auto-trigger-p
+    (setq cody--completion-timer
+          (run-with-idle-timer 0.05 nil #'cody--maybe-trigger-completion))))
 
 (defun cody--completion-cancel-timer ()
   "Cancel any pending timer to check for automatic completions."
@@ -1257,8 +1312,7 @@ Argument PARAMS is the chat response object."
   (ignore-errors ; don't throw errors in process filter
     (with-current-buffer (cody--chat-buffer)
       (goto-char (point-max))
-      (let ((inhibit-read-only t)
-            (inhibit-modification-hooks t))
+      (with-silent-modifications
         (when args (apply #'insert args))
         (set-buffer-modified-p nil)
         (cody--chat-scroll-to-bottom)))))
@@ -1301,13 +1355,17 @@ Cody chat buffer should be current, and PARAMS non-nil."
   (interactive)
   (when (cody--alive-p)
     (ignore-errors
+      (cody--global-mode -1)) ; mode shutdown in all buffers
+    (ignore-errors
       (cody--request 'shutdown nil)) ; Required by the protocol
     (ignore-errors
       (cody--kill-process))
-    (ignore-errors ; sometimes jsonrpc doesn't clean this one up
-      (kill-buffer (get-buffer "*cody events*")))
+    (unless cody--integration-testing-p
+      (ignore-errors ; sometimes jsonrpc doesn't clean this one up
+        (kill-buffer (get-buffer "*cody events*"))))
     (message "Cody has shut down."))
   (setq cody--message-in-progress nil
+        cody--status 'disconnected
         ;; Force re-check of node version on Cody startup.
         cody--node-version-status nil
         cody--server-info nil))
@@ -1381,7 +1439,8 @@ there is a connection."
   "Log MSG with ARGS, currently just for debugging."
   (with-current-buffer (get-buffer-create cody-log-buffer-name)
     (goto-char (point-max))
-    (insert (apply #'format msg args) "\n")))
+    (let ((timestamp (format-time-string "[%Y-%m-%d %H:%M:%S] ")))
+      (insert timestamp (apply #'format msg args) "\n"))))
 
 (defun cody--clear-log ()
   "Clear the *cody-log* debugging message buffer."
@@ -2079,16 +2138,19 @@ Returns an alist where each element is (GROUP . VARIABLES)."
   (save-excursion
     (goto-char (point-min))
     (while (re-search-forward "\"content\":\"[^\"]+\"" nil t)
-      (let* ((beginning (match-beginning 0))
-             (end (match-end 0))
-             (overlay (make-overlay beginning (min end (+ beginning 100)))))
-        (overlay-put overlay 'display (concat
-                                       (buffer-substring beginning (+ beginning 97))
-                                       "... [truncated]"))
-        (overlay-put overlay 'cody-original-content (buffer-substring beginning end))
-        (overlay-put overlay 'face 'font-lock-comment-face)
-        (overlay-put overlay 'cody-shortened t)
-        (add-text-properties beginning end '(read-only t))))))
+      (ignore-errors
+        (let* ((max-length 150)
+               (beginning (match-beginning 0))
+               (end (match-end 0))
+               (overlay (make-overlay beginning (min end (+ beginning 100)))))
+          (overlay-put overlay
+                       'display (concat
+                                 (buffer-substring beginning (+ beginning max-length))
+                                 "... [truncated]"))
+          (overlay-put overlay 'cody-original-content (buffer-substring beginning end))
+          (overlay-put overlay 'face 'font-lock-comment-face)
+          (overlay-put overlay 'cody-shortened t)
+          (add-text-properties beginning end '(read-only t)))))))
 
 (defun cody-event-log-expand-handler (point)
   "Expand the content at POINT if it's shortened."

@@ -1,0 +1,11 @@
+Name: insert one character
+Point-Char: @
+=-=
+class Foo {
+  System.out.println("hello there@")
+}
+=-=
+class Foo {
+  System.out.println("hello there!")
+}
+=-=-=

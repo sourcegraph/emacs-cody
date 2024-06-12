@@ -11,11 +11,52 @@
 
 (package-file "cody.el")
 
-(script "test" "echo \"Error: no test specified\" && exit 1")
-
-(depends-on "emacs" "26.1")
+(depends-on "emacs" "26.3")
 (depends-on "jsonrpc" "1.0.16")
 (depends-on "uuidgen" "20240201.2318")
 
 (development
   (depends-on "buttercup" "1.35"))
+
+(put 'script 'lisp-indent-function '1)
+(script "test"
+  (require 'package)
+  ;; Ensure MELPA is added to package archives
+  (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
+
+  ;; Initialize the package system
+  (package-initialize)
+
+  ;; Bootstrap straight.el if not already available
+  (let ((bootstrap-file (expand-file-name "straight/repos/straight.el/bootstrap.el" user-emacs-directory))
+        (bootstrap-version 5))
+    (unless (file-exists-p bootstrap-file)
+      (with-current-buffer
+          (url-retrieve-synchronously
+           "https://raw.githubusercontent.com/raxod502/straight.el/develop/install.el"
+           'silent 'inhibit-cookies)
+        (goto-char (point-max))
+        (eval-print-last-sexp)))
+    (load bootstrap-file nil 'nomessage))
+
+  ;; Use straight to install uuidgen and other dependencies
+  (straight-use-package 'uuidgen)
+  (require 'uuidgen)
+
+  ;; Optional: Manually set PATH for the CI environment
+  ;;(setenv "PATH" (concat "/custom/path/to/node/bin:" (getenv "PATH")))
+
+  (message "Starting test loading.")
+  (let* ((default-directory (file-name-directory (or load-file-name buffer-file-name)))
+         (project-root (file-name-directory (locate-dominating-file default-directory "Eask")))
+         (test-files (directory-files (expand-file-name "tests" default-directory) t ".*-test\\.el$")))
+    (message "Project root: %s" project-root)
+    (add-to-list 'load-path project-root)
+    (add-to-list 'load-path (expand-file-name "tests" project-root))
+    (message "Load path: %s" load-path)
+    (message "Found test files: %s" test-files)
+    (dolist (file test-files)
+      (message "Loading test file: %s" file)
+      (load file t t t))
+    (message "All testfiles loaded.")
+    (ert-run-tests-batch-and-exit)))

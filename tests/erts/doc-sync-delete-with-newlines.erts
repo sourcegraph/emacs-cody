@@ -1,0 +1,15 @@
+Name: delete with newlines
+Point-Char: @
+=-=
+class Foo {
+  System.out.println("item 1")@
+  System.out.println("item 2")
+  System.out.println("item 3")
+  System.out.println("item 4")
+}
+=-=
+class Foo {
+  System.out.println("item 1")
+  System.out.println("item 4")
+}
+=-=-=

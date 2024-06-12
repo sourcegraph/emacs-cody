@@ -4,9 +4,7 @@ Do not use this yet; it is in development.
 
 * Status
 
-- Code autocompletions should be usable now.
-- Telemetry probably isn't working; API has changed and it needs
-  to be re-implemented for the new protocol.
+- completely broken at the moment from all the protocol changes
 
 * Configuration
 

@@ -40,3 +40,10 @@ We don't currently distribute the WASM files due to their size. They appear as
 artifacts of the build of the agent, in `../cody/agent/dist/`. You can copy them
 all over to `./dist` using the `./build.js` script.
 
+** Integration Testing
+
+The integration tests are runnable from the command line via:
+
+```
+eask test ert
+```

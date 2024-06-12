@@ -1,0 +1,11 @@
+Name: replace range non-atomically
+Point-Char: @
+=-=
+class Foo {
+  @System.out.println("hello there!")
+}
+=-=
+class Foo {
+  console.log("hello there!")
+}
+=-=-=
