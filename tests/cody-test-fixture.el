@@ -66,51 +66,56 @@ followed by the hook functions."
          (add-hook 'cody-ert-after-all-hook
                    (lambda () (funcall ,after-all)))))))
 
-(defmacro def-cody-doc-sync-test (test-name relative-path &rest body)
+;; It would have been nice to support multiple tests per file, as erts does.
+;; But I wasn't able to get my own code scoped in the Code: blocks. This winds
+;; up being pretty clean, though, with the erts tests in their own subdirectory.
+(defmacro def-cody-doc-sync-test (relative-path &rest body)
   "Define a Cody document synchronization test.
-TEST-NAME is the name of the test.
 RELATIVE-PATH is the relative path to the test file.
 BODY is the code to evaluate during the test."
-  `(ert-deftest ,test-name ()
-     "Test the Cody document synchronization functionality."
-     (let* ((cody--integration-testing-p t)
-            (cody--dev-panic-on-doc-desync nil)
-            (cody-completions-auto-trigger-p nil)
-            (test-file-dir (cond
-                            (load-file-name (file-name-directory load-file-name))
-                            (buffer-file-name (file-name-directory buffer-file-name))
-                            (t default-directory)))
-            (absolute-path (expand-file-name ,relative-path test-file-dir)))
-       (should (and absolute-path (file-exists-p absolute-path)))
-       (cody--test-with-temp-window
-        (lambda ()
-          (let ((temp-file (make-temp-file "cody-")))
-            (ert-test-erts-file
-             absolute-path
-             (lambda ()
-               (cody--test-doc-sync-erts-transform
-                (buffer-string)
-                temp-file
-                (lambda () ,@body))))))))))
+  (let* ((base-name (file-name-nondirectory
+                     (directory-file-name
+                      (file-name-sans-extension relative-path))))
+         (test-suffix "doc-sync-")
+         (test-name (intern (concat "cody-" test-suffix
+                                    (replace-regexp-in-string test-suffix
+                                                              ""
+                                                              base-name)))))
+    `(ert-deftest ,test-name ()
+       "Test the Cody document synchronization functionality."
+       ;; Configure Cody for integration testing, trying to minimize differences.
+       (let* ((cody--integration-testing-p t)
+              (cody--dev-panic-on-doc-desync nil)
+              (cody-completions-auto-trigger-p nil)
+              ;; Locate the directory containing this fixture.
+              (test-file-dir (cond
+                              (load-file-name
+                               (file-name-directory load-file-name))
+                              (buffer-file-name
+                               (file-name-directory buffer-file-name))
+                              (t default-directory)))
+              (absolute-test-path (expand-file-name ,relative-path test-file-dir)))
+         (should (and absolute-test-path (file-exists-p absolute-test-path)))
+         ;; We create a temp window because Cody's interaction with the Emacs window
+         ;; hooks require an active window. This window doesn't pop up during testing,
+         ;; but it does stubbornly appear while debugging tests with edebug.
+         (cody--test-with-temp-window
+          (lambda ()
+            ;; We create an artificial temp file for the test, because Cody currently
+            ;; requires the buffer to be visiting a file in order to track it. Even after
+            ;; we add support for untitled documents, it probably makes sense for us to
+            ;; test the visiting-file code path in the normal case.
+            (let ((temp-file (make-temp-file "cody-")))
+              (ert-test-erts-file
+               absolute-test-path
+               ;; Set up the environment for our transformer function, and run it.
+               (lambda ()
+                 (cody--test-doc-sync-erts-transform
+                  (buffer-string)
+                  temp-file
+                  (lambda () ,@body)))))))))))
 
 (put 'def-cody-doc-sync-test 'lisp-indent-function 1)
-
-(defun cody--await-pending-promises ()
-  "Calls `testing/awaitPendingPromises' and blocks until it returns.
-This flushes all the promises on the agent so that tests can be more deterministic.
-Signals an error if `cody--integration-testing-p' is nil."
-  (unless cody--integration-testing-p
-    (error "This method is for testing only."))
-  (jsonrpc-request (cody--connection) 'testing/awaitPendingPromises nil))
-
-(defun cody-test-wait-for (predicate timeout)
-  "Wait for PREDICATE to return non-nil within TIMEOUT seconds.
-Split the timeout into 0.05 second intervals."
-  (let ((end-time (+ (float-time) timeout)))
-    (while (and (not (funcall predicate))
-                (< (float-time) end-time))
-      (accept-process-output nil 0.05))
-    (funcall predicate)))
 
 (defmacro cody--test-with-transform (edit-body)
   "Macro to simplify writing transform functions.
@@ -194,7 +199,7 @@ INITIAL-CONTENT, TEMP-FILE, and EDIT-FN are as for the caller, which see."
                    (transformed-content
                     ;; These erts tests can only use one document at a time.
                     (cody--test-get-sole-mirrored-doc-content uri)))
-              ;; Copy transform back to the erts buffer, where the runner 
+              ;; Copy transform back to the erts buffer, where the runner
               ;; compares it to the expected after-text of the test.
               (with-current-buffer original-buffer
                 (with-silent-modifications
@@ -241,6 +246,23 @@ TEMP-FILE is the temp file created for this test run."
   (set-visited-file-name nil)
   (when (file-exists-p temp-file)
     (delete-file temp-file)))
+
+(defun cody--await-pending-promises ()
+  "Calls `testing/awaitPendingPromises' and blocks until it returns.
+This flushes all the promises on the agent so that tests can be more deterministic.
+Signals an error if `cody--integration-testing-p' is nil."
+  (unless cody--integration-testing-p
+    (error "This method is for testing only."))
+  (jsonrpc-request (cody--connection) 'testing/awaitPendingPromises nil))
+
+(defun cody-test-wait-for (predicate timeout)
+  "Wait for PREDICATE to return non-nil within TIMEOUT seconds.
+Split the timeout into 0.05 second intervals."
+  (let ((end-time (+ (float-time) timeout)))
+    (while (and (not (funcall predicate))
+                (< (float-time) end-time))
+      (accept-process-output nil 0.05))
+    (funcall predicate)))
 
 (provide 'cody-test-fixture)
 ;;; cody-test-fixture.el ends here
