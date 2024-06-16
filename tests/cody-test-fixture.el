@@ -9,6 +9,83 @@
 (require 'cody)
 (require 'cody-repo-util) ; for `cody--uri-for'
 
+;; This is to get `cody--mode-startup' and other cody functions to behave correctly.
+;; It ensures `selected-window' returns something useful, as we use it in several places.
+;; TODO: Check whether this approach is responsible for the dreaded error,
+;;    buttercup--run-spec: Device 1 is not a termcap terminal device
+(defun cody--test-with-temp-window (fn)
+  "Execute FN in a temporary window environment."
+  (let ((buffer (get-buffer-create "*cody-temp-test-buffer*"))
+        (no-save-hook (lambda () (set-buffer-modified-p nil) t)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            ;; Create a temporary window and set it as selected temporarily
+            (let ((window (split-window)))
+              (set-window-buffer window buffer)
+              (select-window window)
+              ;; Add the no-save hook to prevent save prompts
+              (add-hook 'kill-buffer-query-functions no-save-hook nil t)
+              ;; Call the provided test function
+              (funcall fn)
+              ;; Cleanup: remove the temporary window and buffer
+              (delete-window window))))
+      (kill-buffer buffer))))
+
+(defun cody--test-get-sole-mirrored-doc-content (uri)
+  "Assert the agent has one mirrored document, and return its contents.
+URI is the uri for the file/buffer the agent is tracking."
+  (let ((documents (cody--test-request-agent-mirror)))
+    (should (listp documents))
+    (should (= (length documents) 1))
+    (plist-get (car documents) :content)))
+
+(defun cody--test-request-agent-mirror ()
+  "Request documents from the Agent so we can validate the contents.
+Returns the list of `ProtocolTextDocument' plists currently open."
+  (let* ((response (cody--request 'testing/workspaceDocuments nil))
+         (documents (plist-get response :documents))) ; vector
+    (append documents nil))) ; convert to a list
+
+(defun cody--test-doc-sync-get-agent-mirror-for-uri (uri)
+  "Request the `ProtocolTextDocument' plist for URI.
+URI is the uri for a Cody-tracked buffer."
+  (let* ((agent-doc (cody--request 'testing/workspaceDocuments
+                                   (list :uris (vector uri)))))
+    (should agent-doc)
+    agent-doc))
+
+(defun cody--test-doc-sync-cleanup (temp-file)
+  "Perform cleanup actions after an erts transform runs.
+TEMP-FILE is the temp file created for this test run."
+  ;; Notify the agent that this document is closing. This is so that they don't
+  ;; accumulate in AgentWorkspaceDocuments while multiple tests are running.
+  ;; We have to do this because `kill-buffer-hook' is not run on temp buffers.
+  (cody--handle-doc-closed)
+
+  ;; - Unassociate the buffer from the temp file and delete the temp file.
+  ;;   This is so that we aren't prompted to close every temp buffer.
+  (set-visited-file-name nil)
+  (when (file-exists-p temp-file)
+    (delete-file temp-file)))
+
+(defun cody--await-pending-promises ()
+  "Calls `testing/awaitPendingPromises' and blocks until it returns.
+This flushes all the promises on the agent so that tests can be more deterministic.
+Signals an error if `cody--integration-testing-p' is nil."
+  (unless cody--integration-testing-p
+    (error "This method is for testing only."))
+  (jsonrpc-request (cody--connection) 'testing/awaitPendingPromises nil))
+
+(defun cody-test-wait-for (predicate timeout)
+  "Wait for PREDICATE to return non-nil within TIMEOUT seconds.
+Split the timeout into 0.05 second intervals."
+  (let ((end-time (+ (float-time) timeout)))
+    (while (and (not (funcall predicate))
+                (< (float-time) end-time))
+      (accept-process-output nil 0.05))
+    (funcall predicate)))
+
 ;; We use ERT's "erts" mechanism for its declarative before/after tests. But erts
 ;; does not support JUnit-style before-all and after-all setup/teardown functions.
 ;; So we create our own poor-coder's version, by advising `ert-run-tests-batch'.
@@ -123,27 +200,6 @@ EDIT-BODY is the body of the edit operation."
   `(cody--test-doc-sync-erts-transform
     (lambda () ,edit-body)))
 
-;; This is to get `cody--mode-startup' to behave correctly, among other things.
-;; It ensures `selected-window' returns something useful, as we use it in several places.
-(defun cody--test-with-temp-window (fn)
-  "Execute FN in a temporary window environment."
-  (let ((buffer (get-buffer-create "*cody-temp-test-buffer*"))
-        (no-save-hook (lambda () (set-buffer-modified-p nil) t)))
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            ;; Create a temporary window and set it as selected temporarily
-            (let ((window (split-window)))
-              (set-window-buffer window buffer)
-              (select-window window)
-              ;; Add the no-save hook to prevent save prompts
-              (add-hook 'kill-buffer-query-functions no-save-hook nil t)
-              ;; Call the provided test function
-              (funcall fn)
-              ;; Cleanup: remove the temporary window and buffer
-              (delete-window window))))
-      (kill-buffer buffer))))
-
 (defun cody--test-doc-sync-erts-transform (initial-content temp-file edit-fn)
   "The main transform function for erts tests for document synchronization.
 INITIAL-CONTENT is the initial buffer content before modifications.
@@ -207,62 +263,6 @@ INITIAL-CONTENT, TEMP-FILE, and EDIT-FN are as for the caller, which see."
                   (insert transformed-content)))
               transformed-content))
         (cody--test-doc-sync-cleanup temp-file)))))
-
-(defun cody--test-get-sole-mirrored-doc-content (uri)
-  "Assert the agent has one mirrored document, and return its contents.
-URI is the uri for the file/buffer the agent is tracking."
-  (let ((documents (cody--test-request-agent-mirror)))
-    (should (listp documents))
-    (should (= (length documents) 1))
-    (plist-get (car documents) :content)))
-
-(defun cody--test-request-agent-mirror ()
-  "Request documents from the Agent so we can validate the contents.
-Returns the list of `ProtocolTextDocument' plists currently open."
-  (let* ((response (cody--request 'testing/workspaceDocuments nil))
-         (documents (plist-get response :documents))) ; vector
-    (append documents nil))) ; convert to a list
-
-(defun cody--test-doc-sync-get-agent-mirror-for-uri (uri)
-  "Request the `ProtocolTextDocument' plist for URI.
-URI is the uri for a Cody-tracked buffer."
-  (let* ((agent-doc (cody--request 'testing/workspaceDocuments
-                                   (list :uris
-                                         (list :uri (cody--uri-for
-                                                     (buffer-file-name buf)))))))
-    (should agent-doc)
-    agent-doc))
-
-(defun cody--test-doc-sync-cleanup (temp-file)
-  "Perform cleanup actions after an erts transform runs.
-TEMP-FILE is the temp file created for this test run."
-  ;; Notify the agent that this document is closing. This is so that they don't
-  ;; accumulate in AgentWorkspaceDocuments while multiple tests are running.
-  ;; We have to do this because `kill-buffer-hook' is not run on temp buffers.
-  (cody--handle-doc-closed)
-
-  ;; - Unassociate the buffer from the temp file and delete the temp file.
-  ;;   This is so that we aren't prompted to close every temp buffer.
-  (set-visited-file-name nil)
-  (when (file-exists-p temp-file)
-    (delete-file temp-file)))
-
-(defun cody--await-pending-promises ()
-  "Calls `testing/awaitPendingPromises' and blocks until it returns.
-This flushes all the promises on the agent so that tests can be more deterministic.
-Signals an error if `cody--integration-testing-p' is nil."
-  (unless cody--integration-testing-p
-    (error "This method is for testing only."))
-  (jsonrpc-request (cody--connection) 'testing/awaitPendingPromises nil))
-
-(defun cody-test-wait-for (predicate timeout)
-  "Wait for PREDICATE to return non-nil within TIMEOUT seconds.
-Split the timeout into 0.05 second intervals."
-  (let ((end-time (+ (float-time) timeout)))
-    (while (and (not (funcall predicate))
-                (< (float-time) end-time))
-      (accept-process-output nil 0.05))
-    (funcall predicate)))
 
 (provide 'cody-test-fixture)
 ;;; cody-test-fixture.el ends here

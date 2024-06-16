@@ -16,18 +16,15 @@
 (depends-on "uuidgen" "20240201.2318")
 
 (development
-  (depends-on "buttercup" "1.35"))
+ (depends-on "buttercup" "1.35"))
 
 (put 'script 'lisp-indent-function '1)
 (script "test"
   (require 'package)
-  ;; Ensure MELPA is added to package archives
   (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
 
-  ;; Initialize the package system
   (package-initialize)
 
-  ;; Bootstrap straight.el if not already available
   (let ((bootstrap-file (expand-file-name "straight/repos/straight.el/bootstrap.el" user-emacs-directory))
         (bootstrap-version 5))
     (unless (file-exists-p bootstrap-file)
@@ -39,24 +36,33 @@
         (eval-print-last-sexp)))
     (load bootstrap-file nil 'nomessage))
 
-  ;; Use straight to install uuidgen and other dependencies
   (straight-use-package 'uuidgen)
   (require 'uuidgen)
 
-  ;; Optional: Manually set PATH for the CI environment
+  (straight-use-package 'buttercup)
+  (require 'buttercup)
+
+  ;; TODO: Manually set PATH for the CI environment
   ;;(setenv "PATH" (concat "/custom/path/to/node/bin:" (getenv "PATH")))
 
   (message "Starting test loading.")
   (let* ((default-directory (file-name-directory (or load-file-name buffer-file-name)))
          (project-root (file-name-directory (locate-dominating-file default-directory "Eask")))
-         (test-files (directory-files (expand-file-name "tests" default-directory) t ".*-test\\.el$")))
+         (test-dir (expand-file-name "tests" project-root))
+         (buttercup-files (directory-files test-dir t "cody-doc-sync-tests\\.el$"))
+         (ert-files (directory-files test-dir t "cody-doc-sync-ert-tests\\.el$")))
     (message "Project root: %s" project-root)
     (add-to-list 'load-path project-root)
-    (add-to-list 'load-path (expand-file-name "tests" project-root))
-    (message "Load path: %s" load-path)
-    (message "Found test files: %s" test-files)
-    (dolist (file test-files)
-      (message "Loading test file: %s" file)
+    (add-to-list 'load-path test-dir)
+
+    ;; Load and run Buttercup tests.
+    (dolist (file buttercup-files)
+      (message "Loading Buttercup test file: %s" file)
       (load file t t t))
-    (message "All testfiles loaded.")
+    (buttercup-run-discover)
+
+    ;; Load and run ERT tests.
+    (dolist (file ert-files)
+      (message "Loading ERT test file: %s" file)
+      (load file t t t))
     (ert-run-tests-batch-and-exit)))
