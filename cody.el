@@ -29,7 +29,139 @@
 (require 'cody-diff)
 (require 'cody-repo-util)
 
-;;; Completions "API" for the rest of the lisp code:
+;;; Custom variables.
+
+(defgroup cody nil
+  "Sourcegraph Cody."
+  :group 'programming
+  :prefix "cody-")
+
+(defcustom cody-telemetry-enable-p t
+  "Non-nil to allow anonymized event/usage telemetry.
+This information is used by Sourcegraph to improve the product."
+  :group 'cody
+  :type 'boolean)
+
+(defcustom cody-workspace-root (getenv "HOME")
+  "Directory which Cody considers your current project root.
+You can override this to tell Cody to load up and focus on a
+specific project, or by default Cody will attempt to infer it
+from common project structures."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody--internal-anonymized-uuid nil
+  "A generated ID for telemetry, to tie usage events together.
+This is generated and cached on first use, if telemetry is enabled."
+  :type 'string
+  :group 'cody)
+
+(defgroup cody-completions nil
+  "Code autocompletion options."
+  :group 'cody
+  :prefix "cody-completion-"
+  :prefix "cody-completions-")
+
+(defcustom cody-completions-auto-trigger-p t
+  "Non-nil to have Cody prompt with suggestions automatically.
+Completion suggestions will appear after you stop typing for a while,
+if any suggestions are available.  Set this to nil if you prefer to
+use manual completion triggering with `cody-request-completion'."
+  :group 'cody-completions
+  :type 'boolean)
+
+(defcustom cody-completions-display-marker-p t
+  "Non-nil to display completion markers in the minibuffer.
+This helps distinguish Cody's completions from other packages."
+  :group 'cody-completions
+  :type 'boolean)
+
+(defface cody-completion-face
+  '((t :inherit shadow
+       :slant italic
+       ;;:background "#ffffcd" ; uncomment for debugging overlay spans
+       :foreground "#4c8da3"))
+  "Face for Cody completion overlay."
+  :group 'cody-completions)
+
+(defcustom cody-completions-enable-cycling-p t
+  "Non-nil to allow cycling among alternative completion suggestions.
+These are not always available, but when they are, you can cycle
+between them with `cody-completion-cycle-next' and
+`cody-completion-cycle-prev'.  When nil, cycling is completely
+disabled, and only the first option returned by the server is
+ever displayed or interactible."
+  :group 'cody
+  :type 'boolean)
+
+(defcustom cody-completions-cycling-help-p t
+  "Non-nil to show a message in the minibuffer for cycling completions.
+If non-nil, and multiple completion suggestions are returned from the
+server, it will show how many are available and how to cycle them.
+If nil, no messages are printed when cycling is available or used."
+  :group 'cody
+  :type 'boolean)
+
+(defcustom cody-default-branch-name "main"
+  "Default branch name for the current projectp."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody-remote-url-replacements ""
+  "Whitespace-separated pairs of replacements for repo URLs."
+  :group 'cody
+  :type 'string)
+
+(defgroup cody-dev nil
+  "Cody developer/contributor configuration settings."
+  :group 'cody
+  :prefix "cody--dev-")
+
+(defcustom cody--dev-node-executable nil
+  "Hardwired path to the nodejs binary to use for Cody.
+If nil, Cody will search for node using variable `exec-path'."
+  :group 'cody
+  :type 'string)
+
+(defcustom cody--dev-node-min-version "20.4.0"
+  "The minimum required version of Node.js."
+  :group 'cody-dev
+  :type 'string)
+
+(defcustom cody--dev-use-remote-agent nil
+  "Non-nil to connect to an agent running on `cody--dev-remote-agent-port`.
+This is a setting for contributors to Cody-Emacs."
+  :group 'cody-dev
+  :type 'boolean)
+
+(defcustom cody--dev-remote-agent-port 3113
+  "The port on which to attach to a remote Agent.
+The remote Agent is typically started by an IDE such as VS code,
+and enables you to set breakpoints on both sides of the protocol."
+  :group 'cody-dev
+  :type 'number)
+
+;; TODO: When this value changes, if cody is alive, notify the agent.
+(defcustom cody--dev-enable-agent-debug-p nil
+  "Non-nil to enable debugging in the agent.
+Sends this flag as part of the agent extension configuration."
+  :group 'cody-dev
+  :type 'boolean)
+
+(defcustom cody--dev-enable-agent-debug-verbose-p nil
+  "Non-nil to enable verbose debugging in the agent.
+Sends this flag as part of the agent extension configuration."
+  :group 'cody-dev
+  :type 'boolean)
+
+(defcustom cody--dev-panic-on-doc-desync nil
+  "Non-nil to ask the Agent to panic if we discover it is desynced.
+De-syncing is when the Agent's copy of a document is out of sync with
+the actual document in Emacs. Setting this customn variable to non-nil,
+which should only be done in development, sends extra metadata along
+with document changes, which the Agent will compare against."
+  :group 'cody-dev
+  :type 'boolean)
 
 (defclass cody-completion-item ()
   ((insertText :initarg :insertText
@@ -255,145 +387,6 @@ Argument CC is the completion object."
                :documentation "The authentication status of the server."))
   "Class representing server information.")
 
-;;; Custom variables.
-
-(defgroup cody nil
-  "Sourcegraph Cody."
-  :group 'programming
-  :prefix "cody-")
-
-(defcustom cody-telemetry-enable-p t
-  "Non-nil to allow anonymized event/usage telemetry.
-This information is used by Sourcegraph to improve the product."
-  :group 'cody
-  :type 'boolean)
-
-(defcustom cody-workspace-root (getenv "HOME")
-  "Directory which Cody considers your current project root.
-You can override this to tell Cody to load up and focus on a
-specific project, or by default Cody will attempt to infer it
-from common project structures."
-  :group 'cody
-  :type 'string)
-
-(defcustom cody--internal-anonymized-uuid nil
-  "A generated ID for telemetry, to tie usage events together.
-This is generated and cached on first use, if telemetry is enabled."
-  :type 'string
-  :group 'cody)
-
-(defgroup cody-completions nil
-  "Code autocompletion options."
-  :group 'cody
-  :prefix "cody-completion-"
-  :prefix "cody-completions-")
-
-(defcustom cody-completions-auto-trigger-p t
-  "Non-nil to have Cody prompt with suggestions automatically.
-Completion suggestions will appear after you stop typing for a while,
-if any suggestions are available.  Set this to nil if you prefer to
-use manual completion triggering with `cody-request-completion'."
-  :group 'cody-completions
-  :type 'boolean)
-
-(defcustom cody-completions-display-marker-p t
-  "Non-nil to display completion markers in the minibuffer.
-This helps distinguish Cody's completions from other packages."
-  :group 'cody-completions
-  :type 'boolean)
-
-(defface cody-completion-face
-  '((t :inherit shadow
-       :slant italic
-       ;;:background "#ffffcd" ; uncomment for debugging overlay spans
-       :foreground "#4c8da3"))
-  "Face for Cody completion overlay."
-  :group 'cody-completions)
-
-(defcustom cody-completions-enable-cycling-p t
-  "Non-nil to allow cycling among alternative completion suggestions.
-These are not always available, but when they are, you can cycle
-between them with `cody-completion-cycle-next' and
-`cody-completion-cycle-prev'.  When nil, cycling is completely
-disabled, and only the first option returned by the server is
-ever displayed or interactible."
-  :group 'cody
-  :type 'boolean)
-
-(defcustom cody-completions-cycling-help-p t
-  "Non-nil to show a message in the minibuffer for cycling completions.
-If non-nil, and multiple completion suggestions are returned from the
-server, it will show how many are available and how to cycle them.
-If nil, no messages are printed when cycling is available or used."
-  :group 'cody
-  :type 'boolean)
-
-(defcustom cody-default-branch-name "main"
-  "Default branch name for the current projectp."
-  :group 'cody
-  :type 'string)
-
-(defcustom cody-remote-url-replacements ""
-  "Whitespace-separated pairs of replacements for repo URLs."
-  :group 'cody
-  :type 'string)
-
-(defgroup cody-dev nil
-  "Cody developer/contributor configuration settings."
-  :group 'cody
-  :prefix "cody--dev-")
-
-(defcustom cody--dev-node-executable nil
-  "Hardwired path to the nodejs binary to use for Cody.
-If nil, Cody will search for node using variable `exec-path'."
-  :group 'cody
-  :type 'string)
-
-(defcustom cody--dev-node-min-version "20.4.0"
-  "The minimum required version of Node.js."
-  :group 'cody-dev
-  :type 'string)
-
-(defcustom cody--dev-use-remote-agent nil
-  "Non-nil to connect to an agent running on `cody--dev-remote-agent-port`.
-This is a setting for contributors to Cody-Emacs."
-  :group 'cody-dev
-  :type 'boolean)
-
-(defcustom cody--dev-remote-agent-port 3113
-  "The port on which to attach to a remote Agent.
-The remote Agent is typically started by an IDE such as VS code,
-and enables you to set breakpoints on both sides of the protocol."
-  :group 'cody-dev
-  :type 'number)
-
-;; TODO: When this value changes, if cody is alive, notify the agent.
-(defcustom cody--dev-enable-agent-debug-p nil
-  "Non-nil to enable debugging in the agent.
-Sends this flag as part of the agent extension configuration."
-  :group 'cody-dev
-  :type 'boolean)
-
-(defcustom cody--dev-enable-agent-debug-verbose-p nil
-  "Non-nil to enable verbose debugging in the agent.
-Sends this flag as part of the agent extension configuration."
-  :group 'cody-dev
-  :type 'boolean)
-
-(defcustom cody--dev-panic-on-doc-desync nil
-  "Non-nil to ask the Agent to panic if we discover it is desynced.
-De-syncing is when the Agent's copy of a document is out of sync with
-the actual document in Emacs. Setting this customn variable to non-nil,
-which should only be done in development, sends extra metadata along
-with document changes, which the Agent will compare against."
-  :group 'cody-dev
-  :type 'boolean)
-
-(defconst cody--defgroups '(cody cody-completions cody-dev)
-  "List of Cody-related `defgroup's to include in `cody-dashboard'.")
-
-;;; State variables.
-
 (defconst cody--dotcom-url "https://sourcegraph.com/")
 
 (defconst cody--cody-agent
@@ -521,6 +514,9 @@ and the symbol `cody--status' will have an `error' property.")
     cody--dev-enable-agent-debug-p
     cody--dev-enable-agent-debug-verbose-p)
   "List of custom variables to display in `cody-dashboard'.")
+
+(defconst cody--defgroups '(cody cody-completions cody-dev)
+  "List of Cody-related `defgroup's to include in `cody-dashboard'.")
 
 (defsubst cody--timestamp ()
   "Return seconds since epoch."
