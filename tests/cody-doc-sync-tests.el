@@ -17,10 +17,12 @@ ARGS is a plist containing the keys:
   :before - the initial content of the buffer.
   :after - the expected content of the buffer after transformation.
   :code - the code to run to perform the transformation.
-  :point-char (optional) - the character in :before text marking the cursor position.
-  :mark-char (optional) - the character in :before text marking the mark position.
+  :point-char (optional) - the character in :before text marking
+                           the cursor position. Default is ?^
+  :mark-char (optional) - the character in :before text marking the
+                          mark position. Default is ?$
 
-The general test strate is to run a transformation, await promises, and then
+The general test strategy is to run a transformation, await promises, and then
 fetch the agent's copy of the content and compare it."
   (let ((before (plist-get args :before))
         (after (plist-get args :after))
@@ -104,8 +106,11 @@ CODE is a lambda function representing the test code to execute."
 
               ;; Uncomment to compare the contents, as edebug struggles
               ;; with the `expect' forms below.
+
+              ;; TODO:  Pass in the test name so we can print it here.
+
               ;; (message "Expected Content: '%s'" expected-content)
-              ;; (message "Agent Content: '%s'" agent-content))
+              ;; (message "Agent Content: '%s'" agent-content)
 
               (expect (stringp agent-content) :to-be-truthy)
               (expect (string= expected-content agent-content) :to-be-truthy)
@@ -117,23 +122,26 @@ CODE is a lambda function representing the test code to execute."
 ;;   cd .. && eask run buttercup
 ;; or:
 ;;   M-x buttercup-run-at-point on this sexpr:
+;;
+;; To skip a test:
+;;   - insert (buttercup-skip "reason") at the top, after the it-clause.
+;; 
 (describe "Cody doc-sync tests"
   (before-all (cody-shutdown))
   (after-all (cody-shutdown))
-
+  
   (it "tracks adding a selection"
-    (buttercup-skip "testing next test")
     (cody--test-doc-sync
      :before "
 class Foo {
-  ^System.out.println(\"hello\")
+  ^console.log(\"hello\")
 }
 "
      ;; We don't need to specify the selection here, as the test will compare
      ;; the RPC result's selection to the temp buffer's current selection.
      :after "
 class Foo {
-  System.out.println(\"hello\")
+  console.log(\"hello\")
 }
 "
      :code
@@ -142,17 +150,121 @@ class Foo {
 
 
   ;; TODO: More selection tests
+  
+  (it "tracks inserting a char"
+    :point-char "@"
+
+    :before "
+class Foo {
+  console.log(\"hello there@\")
+}
+"
+    :after "
+class Foo {
+  console.log(\"hello there!\")
+}
+"
+    :code
+    (insert "!"))
+
+ (it "tracks deleting a char"
+    :before "
+lass Foo {
+  console.log(\"hello there^!\")
+}
+"
+    :after "
+class Foo {
+ console.log(\"hello there\")
+}
+"
+    :code
+    (delete-char 1))
+
+  (it "tracks deleting a range"
+    :before "
+class Foo {
+  ^console.log(\"hello there!\")
+}
+"
+    :after "
+class Foo {
+  (\"hello there!\")
+}
+"
+    :code
+    (kill-word 3))
+
+  (it "tracks replacing a range atomically"
+    :before "
+class Foo {
+  ^console.log(\"hello there!\")
+}
+! {
+  console.log(\"hello there!\")
+}
+"
+    :code
+    (save-excursion
+      (goto-char (point-min))
+      (while (search-forward "console.log" nil t)
+        (replace-match "console.log"))))
+
+  (it "tracks replacing a range non-atomically"
+    :before "
+class Foo {
+  ^console.log(\"hello there!\")
+}
+"
+    :after "
+class Foo {
+  console.log(\"hello there!\")
+}
+"
+    :code
+    (progn
+      (kill-word 3)
+      (insert "console.log")))
+
+  (it "tracks inserting with newlines"
+    :before "
+class Foo {
+  console.log(\"hello there!\")@
+}
+"
+    :after "
+class Foo {
+  console.log(\"hello there!\")
+  console.log(\"this is a test\")
+  console.log(\"hello hello\")
+}
+"
+    :code
+    (progn
+      (insert "\n  console.log(\"this is a test\")")
+      (insert "\n  console.log(\"hello hello\")")))
+
+  (it "tracks erasing the document"
+    :before "
+class Foo {
+  ^console.log(\"hello there!\")
+}
+"
+    :after "
+"
+    :code
+    (delete-region (point-min) (point-max)))
 
   (it "syncs agent when appending to end of document"
     (cody--test-doc-sync
      :before "
 class Foo {
-  System.out.println(\"hello there!\")
+  console.log(\"hello there!\")
 }
 "
      :after "
 class Foo {
-  System.out.println(\"hello there!\")
+  console.log(\"hello there!\")
 }
 // antidisestablishmentarianism
 // pneumonoultramicroscopicsilicovolcanoconiosis
@@ -162,7 +274,73 @@ class Foo {
        (goto-char (point-max))
        (insert "// antidisestablishmentarianism\n")
        (insert "// pneumonoultramicroscopicsilicovolcanoconiosis\n"))))
-  )
+
+  (it "tracks deleting ranges with newlines"
+    :point-char "@"
+
+    :before "
+class Foo {
+  console.log(\"item 1\")@
+  console.log(\"item 2\")
+  console.log(\"item 3\")
+  console.log(\"item 4\")
+}
+"
+    :after "
+class Foo {
+  console.log(\"item 1\")
+  console.log(\"item 4\")
+}
+"
+    :code
+    (delete-region (point)
+                   (save-excursion
+                     (forward-line 3)
+                     (1- (point)))))
+
+  (it "tracks inserting emojis"
+    :before "
+class Foo {
+  console.log(\"hello there^\")
+}
+"
+    :after "
+class Foo {
+  console.log(\"hello there!🎉🎂
+🥳🎈\")
+}
+"
+    :code
+    (insert "!🎉🎂\n🥳🎈"))
+
+  (it "tracks multiple edits"
+    :before "
+class Foo {
+  console.log("hello there")
+}
+"
+    :after "
+import com.foo.Bar;
+
+class Foo {
+  // no comment
+  console.log("hello there");
+}
+// end class Foo
+"
+    :code
+    (progn (goto-char (point-min))
+           (insert "import com.foo.Bar;\n\n")
+           (search-forward "{\n")
+           (open-line 1)
+           (insert "  // no comment")
+           (forward-line 1)
+           (goto-char (line-end-position))
+           (insert ";")
+           (goto-char (point-max))
+           (insert "// end class Foo\n")))
+
+  ) ; end describe
 
 (provide 'cody-doc-sync-tests)
 ;;; cody-doc-sync-tests.el ends here

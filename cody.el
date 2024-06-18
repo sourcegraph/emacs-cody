@@ -658,7 +658,7 @@ and returns it."
           (make-instance
            'jsonrpc-process-connection
            :name "cody"
-           :events-buffer-scrollback-size nil
+           :events-buffer-config nil
            :notification-dispatcher #'cody--handle-agent-notification
            :process
            (if cody--dev-use-remote-agent
