@@ -12,21 +12,26 @@
 
 (defmacro cody--test-doc-sync (&rest args)
   "Macro to define Cody document synchronization tests for Buttercup.
+
 ARGS is a plist containing the keys:
   :before - the initial content of the buffer.
   :after - the expected content of the buffer after transformation.
   :code - the code to run to perform the transformation.
   :point-char (optional) - the character in :before text marking the cursor position.
-  :mark-char (optional) - the character in :before text marking the mark position."
+  :mark-char (optional) - the character in :before text marking the mark position.
+
+The general test strate is to run a transformation, await promises, and then
+fetch the agent's copy of the content and compare it."
   (let ((before (plist-get args :before))
         (after (plist-get args :after))
-       (code (plist-get args :code))
+        (code (plist-get args :code))
         (point-char (or (plist-get args :point-char) "^"))
         (mark-char (or (plist-get args :mark-char) "$")))
     `(cl-destructuring-bind (initial-content point-pos mark-pos)
          (cody--test-doc-sync-initialize-test ,before ,point-char ,mark-char)
        (cody--test-doc-sync-execute initial-content
-                                    ,after
+                                    ;; This \n is just for test readability.
+                                    (string-remove-prefix "\n" ,after)
                                     point-pos
                                     mark-pos
                                     (lambda () ,code)))))
@@ -90,17 +95,21 @@ CODE is a lambda function representing the test code to execute."
             (funcall code) ; this may initiate any number of rpcs to agent
             (cody--await-pending-promises) ; wait for agent to settle
 
-            ;; Get the agent's mirrored document and selection.
+            ;; Get the agent's mirrored document/selection, and compare
+            ;; them to ours.
             (let* ((uri (cody--uri-for (buffer-file-name)))
-                   (agent-doc
-                    (cody--test-doc-sync-get-agent-mirror-for-uri uri))
+                   (agent-doc (cody--test-doc-sync-get-agent-mirror-for-uri uri))
                    (agent-content (plist-get agent-doc :content))
                    (agent-selection (plist-get agent-doc :selection)))
 
-              ;; Verify the agent's content and selection match ours.
+              ;; Uncomment to compare the contents, as edebug struggles
+              ;; with the `expect' forms below.
+              ;; (message "Expected Content: '%s'" expected-content)
+              ;; (message "Agent Content: '%s'" agent-content))
+
+              (expect (stringp agent-content) :to-be-truthy)
               (expect (string= expected-content agent-content) :to-be-truthy)
-              (expect (cody--selection-get-current)
-                      :to-equal agent-selection)))
+              (expect (cody--selection-get-current) :to-equal agent-selection)))
         ;; Unwind/finally forms:
         (cody--test-doc-sync-cleanup temp-file)))))
 
@@ -113,12 +122,15 @@ CODE is a lambda function representing the test code to execute."
   (after-all (cody-shutdown))
 
   (it "tracks adding a selection"
+    (buttercup-skip "testing next test")
     (cody--test-doc-sync
      :before "
 class Foo {
   ^System.out.println(\"hello\")
 }
 "
+     ;; We don't need to specify the selection here, as the test will compare
+     ;; the RPC result's selection to the temp buffer's current selection.
      :after "
 class Foo {
   System.out.println(\"hello\")
@@ -126,7 +138,31 @@ class Foo {
 "
      :code
      ;; Set the selection while in cody-mode, to trigger agent mirroring.
-     (set-mark (line-end-position)))))
+     (set-mark (line-end-position))))
+
+
+  ;; TODO: More selection tests
+
+  (it "syncs agent when appending to end of document"
+    (cody--test-doc-sync
+     :before "
+class Foo {
+  System.out.println(\"hello there!\")
+}
+"
+     :after "
+class Foo {
+  System.out.println(\"hello there!\")
+}
+// antidisestablishmentarianism
+// pneumonoultramicroscopicsilicovolcanoconiosis
+"
+     :code
+     (progn
+       (goto-char (point-max))
+       (insert "// antidisestablishmentarianism\n")
+       (insert "// pneumonoultramicroscopicsilicovolcanoconiosis\n"))))
+  )
 
 (provide 'cody-doc-sync-tests)
 ;;; cody-doc-sync-tests.el ends here

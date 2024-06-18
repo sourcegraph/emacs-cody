@@ -48,10 +48,13 @@ Returns the list of `ProtocolTextDocument' plists currently open."
     (append documents nil))) ; convert to a list
 
 (defun cody--test-doc-sync-get-agent-mirror-for-uri (uri)
-  "Request the `ProtocolTextDocument' plist for URI.
-URI is the uri for a Cody-tracked buffer."
-  (let* ((agent-doc (cody--request 'testing/workspaceDocuments
-                                   (list :uris (vector uri)))))
+  "Request the agent's single `ProtocolTextDocument' for URI.
+URI is the uri for a Cody-tracked buffer.
+Return value is a plist representing the `ProtocolTextDocument'."
+  (let* ((result (cody--request 'testing/workspaceDocuments
+                                (list :uris (vector uri))))
+         (documents (plist-get result :documents))
+         (agent-doc (aref documents 0)))
     (should agent-doc)
     agent-doc))
 

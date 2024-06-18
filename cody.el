@@ -462,8 +462,10 @@ property whose value is the last error received.")
     (window-selection-change-functions . cody--handle-focus-changed)
     (window-buffer-change-functions . cody--handle-focus-changed)
     (post-command-hook . cody--post-command)
-    (kill-buffer-hook . cody--handle-doc-closed))
-  "List of buffer-local hooks that Cody registers on in `cody-mode'.
+    (kill-buffer-hook . cody--handle-doc-closed)
+    (activate-mark-hook . cody--handle-selection-change)
+    (deactivate-mark-hook . cody--handle-selection-change))
+  "List of buffer-local hooks that Cody registers on in `cody-mode`.
 These hooks enable it to keep buffers and selections synced
 with the Cody Agent.")
 
@@ -531,6 +533,9 @@ its workspace is not currently live, so Cody is not tracking changes to
 the file nor using it for context. Ignored means that an admin has
 configured the file or repo to be excluded from Cody. The `error' state
 usually means communication with the backend is down.")
+
+(defvar-local cody--last-selection nil
+  "Stores the last known selection range to detect changes.")
 
 (defvar cody-mode-menu)
 
@@ -689,9 +694,11 @@ Returns a `cody-server-info' instance."
                    :chatModel (plist-get config :chatModel)
                    :chatModelMaxTokens (cjf (plist-get config :chatModelMaxTokens))
                    :fastChatModel (plist-get config :fastChatModel)
-                   :fastChatModelMaxTokens (cjf (plist-get config :fastChatModelMaxTokens))
+                   :fastChatModelMaxTokens (cjf (plist-get config
+                                                           :fastChatModelMaxTokens))
                    :completionModel (plist-get config :completionModel)
-                   :completionModelMaxTokens (cjf (plist-get config :completionModelMaxTokens))
+                   :completionModelMaxTokens (cjf (plist-get
+                                                   config :completionModelMaxTokens))
                    :provider (plist-get config :provider)
                    :smartContextWindow (cjf (plist-get config :smartContextWindow))))))
     (let* ((auth-status (plist-get response :authStatus))
@@ -705,10 +712,13 @@ Returns a `cody-server-info' instance."
                  :endpoint (cjf (plist-get auth-status :endpoint))
                  :isDotCom (cjf (plist-get auth-status :isDotCom))
                  :isLoggedIn (cjf (plist-get auth-status :isLoggedIn))
-                 :showInvalidAccessTokenError (cjf (plist-get auth-status :showInvalidAccessTokenError))
+                 :showInvalidAccessTokenError (cjf (plist-get
+                                                    auth-status
+                                                    :showInvalidAccessTokenError))
                  :authenticated (cjf (plist-get auth-status :authenticated))
                  :hasVerifiedEmail (cjf (plist-get auth-status :hasVerifiedEmail))
-                 :requiresVerifiedEmail (cjf (plist-get auth-status :requiresVerifiedEmail))
+                 :requiresVerifiedEmail (cjf (plist-get auth-status
+                                                        :requiresVerifiedEmail))
                  :siteHasCodyEnabled (cjf (plist-get auth-status :siteHasCodyEnabled))
                  :siteVersion (plist-get auth-status :siteVersion)
                  :codyApiVersion (cjf (plist-get auth-status :codyApiVersion))
@@ -978,9 +988,7 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
              do (add-hook hook func nil 'local))
     (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
     (force-mode-line-update t)
-    ;; This initializes the state and needs to be called first.
     (cody--handle-focus-changed (selected-window)))
-  ;; This chooses an appropriate mode-line icon.
   (cody--buffer-init-state))
 
 (defun cody--mode-shutdown ()
@@ -1089,6 +1097,15 @@ Current buffer is visiting the document under consideration."
           (cody--notify-doc-did-focus)
         (cody--notify-doc-did-open)))))
 
+(defun cody--handle-selection-change ()
+  "Handle changes in the selection or region."
+  (let ((current-selection (cody--selection-get-current)))
+    (unless (equal current-selection cody--last-selection)
+      (setq cody--last-selection current-selection)
+      (condition-case err
+          (cody--notify-doc-did-focus)
+        (error (cody--log "Error in `cody--handle-selection-change': %s" err))))))
+
 (defun cody--buffer-init-state ()
   "Initialize `cody--buffer-state' for the current buffer.
 Returns the new value."
@@ -1169,30 +1186,22 @@ This is a synchronous call that suspends the caller until it completes."
 
 (defun cody--selection-get-current (&optional buf)
   "Return the jsonrpc parameters representing the selection in BUF.
-Uses current buffer if BUF is nil.
-If the region is not active, the selection is zero-width at point.
-BUF can be a buffer or buffer name, and we return a Range with `start'
-and `end' parameters, each a Position of 1-indexed `line' and `character'.
-The return value is appropiate for sending directly to the rpc layer."
+Uses current buffer if BUF is nil. If the region is not active, 
+the selection is zero-width at point. BUF can be a buffer or 
+buffer name,and we return a Range with `start' and `end' parameters, 
+each a Position of 1-indexed `line' and `character'. The return 
+value is appropriate for sending directly to the rpc layer."
   (or buf (setq buf (current-buffer)))
-  (cl-flet ((pos-parameters (pos)
-              ;; agent protocol range line/char are always 0-indexed
-              (list :line (1- (line-number-at-pos pos))
-                    :character (save-excursion
-                                 (goto-char pos)
-                                 (current-column)))))
-    (with-current-buffer buf
-      (let* ((mark (if mark-active (mark) (point)))
-             (point (point))
-             (beg (min mark point))
-             (end (max mark point))
-             (beg-pos (pos-parameters beg))
-             (end-pos (pos-parameters end)))
-        (list :start beg-pos :end end-pos)))))
+  (with-current-buffer buf
+    (let* ((begin (if (or (use-region-p) mark-active) (region-beginning) (point)))
+           (end (if (or (use-region-p) mark-active) (region-end) (point))))
+      (list :start (cody--position-from-offset begin)
+            :end (cody--position-from-offset end)))))
 
 (defun cody--post-command ()
   "If point or mark has moved, update selection/focus with agent.
 Installed on `post-command-hook'."
+  (cody--handle-selection-change)
   (condition-case err
       (cody--completion-start-timer)
     (error (cody--log "Error in `cody--post-command': %s: %s" buffer-file-name err))))
