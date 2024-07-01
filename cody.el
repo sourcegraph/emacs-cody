@@ -70,7 +70,7 @@ use manual completion triggering with `cody-request-completion'."
   :group 'cody-completions
   :type 'boolean)
 
-(defcustom cody-completions-display-marker-p t
+(defcustom cody-completions-display-marker-p nil
   "Non-nil to display completion markers in the minibuffer.
 This helps distinguish Cody's completions from other packages."
   :group 'cody-completions
@@ -589,7 +589,8 @@ usually means communication with the backend is down.")
 
 (defsubst cody--buffer-string ()
   "Return the entire current buffer's contents as a string."
-  (buffer-substring-no-properties (point-min) (point-max)))
+  (without-restriction
+    (buffer-substring-no-properties (point-min) (point-max))))
 
 (defsubst cody--convert-json-false (val)
   "Convert JSON false (:json-false) to nil. Leave other values unchanged."
@@ -643,7 +644,7 @@ usually means communication with the backend is down.")
     (cody--connection-create-process)
     (if (cody--alive-p)
         (progn
-          (activate-cody-event-log-mode)
+          (cody--activate-event-log-mode)
           (cody--initialize-connection))
       (cody--log "Failed to start cody agent process: %s" cody--connection)
       (setq cody--connection nil)))
@@ -679,9 +680,9 @@ and returns it."
 (defun cody--agent-process-environment ()
   "Return the environment variables to set in the Agent."
   (list
-    (format "PATH=%s" (getenv "PATH")) ; Propagate PATH
-    (concat "CODY_CLIENT_INTEGRATION_TESTING="
-            (if cody--integration-testing-p "true" "false"))))
+   (format "PATH=%s" (getenv "PATH")) ; Propagate PATH
+   (concat "CODY_CLIENT_INTEGRATION_TESTING="
+           (if cody--integration-testing-p "true" "false"))))
 
 (defun cody-populate-server-info (response)
   "Populate the ServerInfo instance from the RESPONSE.
@@ -1099,6 +1100,16 @@ Current buffer is visiting the document under consideration."
 
 (defun cody--handle-selection-change ()
   "Handle changes in the selection or region."
+
+  ;; To CHOP:
+  ;;  - fix this to hide the completion only if point has gone off the line
+  ;;  - maybe have design discussion first
+  ;;  - you may need to have it implement a function returning the line of the current overlay
+
+  ;; (when (cody--overlay-visible-p)
+  ;;   (cody--completion-hide))
+
+  (cody--completion-start-timer)
   (let ((current-selection (cody--selection-get-current)))
     (unless (equal current-selection cody--last-selection)
       (setq cody--last-selection current-selection)
@@ -1171,12 +1182,7 @@ This is a synchronous call that suspends the caller until it completes."
 
 (defun cody--completion-start-timer ()
   "Set a cancellable timer to check for an automatic completion."
-  ;; This is a debounce so we don't request one until they stop typing.
-  ;; It requests immediately after they go idle.
-  ;; TODO: Try removing the timer and just call (cody--maybe-trigger-completion) here.
-  (when cody-completions-auto-trigger-p
-    (setq cody--completion-timer
-          (run-with-idle-timer 0.05 nil #'cody--maybe-trigger-completion))))
+  (cody--maybe-trigger-completion))
 
 (defun cody--completion-cancel-timer ()
   "Cancel any pending timer to check for automatic completions."
@@ -1186,25 +1192,29 @@ This is a synchronous call that suspends the caller until it completes."
 
 (defun cody--selection-get-current (&optional buf)
   "Return the jsonrpc parameters representing the selection in BUF.
-Uses current buffer if BUF is nil. If the region is not active, 
-the selection is zero-width at point. BUF can be a buffer or 
-buffer name,and we return a Range with `start' and `end' parameters, 
-each a Position of 1-indexed `line' and `character'. The return 
+Uses current buffer if BUF is nil. If the region is not active,
+the selection is zero-width at point. BUF can be a buffer or
+buffer name,and we return a Range with `start' and `end' parameters,
+each a Position of 1-indexed `line' and `character'. The return
 value is appropriate for sending directly to the rpc layer."
   (or buf (setq buf (current-buffer)))
   (with-current-buffer buf
-    (let* ((begin (if (or (use-region-p) mark-active) (region-beginning) (point)))
-           (end (if (or (use-region-p) mark-active) (region-end) (point))))
+    (let* ((begin (if (or (use-region-p) mark-active)
+                      (region-beginning)
+                    (point)))
+           (end (if (or (use-region-p) mark-active)
+                    (region-end)
+                  (point))))
       (list :start (cody--position-from-offset begin)
             :end (cody--position-from-offset end)))))
 
 (defun cody--post-command ()
   "If point or mark has moved, update selection/focus with agent.
 Installed on `post-command-hook'."
-  (cody--handle-selection-change)
   (condition-case err
-      (cody--completion-start-timer)
-    (error (cody--log "Error in `cody--post-command': %s: %s" buffer-file-name err))))
+      (cody--handle-selection-change)
+    (error (cody--log "Error in `cody--post-command': %s: %s"
+                      buffer-file-name err))))
 
 (defun cody--handle-typing-while-suggesting (beg end len)
   "Either recompute completion or dispel it, depending on the change.
@@ -1437,7 +1447,7 @@ there is a connection."
 
 (defun cody-unload-function ()
   "Handle `unload-feature' for this package."
-  ;; TODO: Test this
+  ;; TODO: Write integration test for this.
   (cody-logout))
 
 (defun cody--log (msg &rest args)
@@ -1490,11 +1500,12 @@ Query and output go into the *cody-chat* buffer."
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (when (cody--mode-active-p)
-    (when-let ((o (car-safe cody--overlay-deltas)))
-      (and (overlayp o)
-           (overlay-buffer o) ; overlay is positioned/visible somewhere
-           (cody--cc))))) ; not a zombie
+  (when-let* ((active (cody--mode-active-p))
+              (o (car-safe cody--overlay-deltas))
+              (_ (overlayp o))
+              (_ (overlay-buffer o)) ; overlay is positioned/visible somewhere
+              (_ (cody--cc))) ; not a zombie
+    t))
 
 (defun cody--make-overlay (text pos)
   "Create a new overlay for displaying part of a completion suggestion.
@@ -1589,18 +1600,16 @@ Also calls the default key binding."
        (memq (event-basic-type event) '(mouse-1 mouse-2 mouse-3))))
 
 (defun cody--completion-syntactically-eligible-p ()
-  "Return non-nil if this is a valid location for a completion trigger.
-Does syntactic smoke screens before requesting completion from Agent."
-  (not (or
-        ;; user is in the middle of a word (from jetbrains cody client)
-        (looking-back "\\s*[A-Za-z]+" (cody--bol))
-        ;; suffix of the current line contains any word characters
-        (looking-at ".*\\w.*"))))
+  "Return non-nil if this is a valid location for a completion trigger."
+  (not
+   ;; User is in the middle of a word (from jetbrains cody client)
+   (looking-back "\\s*[A-Za-z]+" (cody--bol))))
 
 (defun cody-request-completion ()
   "Request manual autocompletion in current buffer at point."
   (interactive)
-  (unless (cody--mode-active-p)
+  (when (and (called-interactively-p 'any)
+             (not (cody--mode-active-p)))
     (error "Cody-mode not enabled in this buffer."))
   (let* ((buf (current-buffer))
          (line (1- (line-number-at-pos)))
@@ -1830,7 +1839,12 @@ remove all traces of the last code completion response."
 NOTIFICATION is the fire-and-forget protocol message to send.
 Does nothing if custom option `cody-telemetry-enable-p' is nil."
   (when cody-telemetry-enable-p
-    (let ((event-id (plist-get (cody--completion-event (cody--cc)) :id)))
+    (when-let ((event-id (condition-case err
+                             (plist-get (cody--completion-event (cody--cc)) :id)
+                           (error
+                            (cody--log "Malformed completion event: no :id param: %s "
+                                       err)
+                            nil))))
       (condition-case err
           (cody--notify notification (list :completionID event-id))
         (error (cody--log "Error on id=%s %s: %s" event-id notification err))))))
@@ -2178,14 +2192,14 @@ Returns an alist where each element is (GROUP . VARIABLES)."
 
 (define-key cody-event-log-mode-map (kbd "C-c C-e") 'cody-event-log-expand-handler)
 
-(defun activate-cody-event-log-mode ()
+(defun cody--activate-event-log-mode ()
   "Activate `cody-event-log-mode' in the `*cody events*' buffer."
   (run-with-idle-timer
    0.1 nil
    (lambda ()
      (condition-case err
          (let ((inhibit-read-only t))
-           (with-current-buffer (get-buffer "*cody events*")
+           (with-current-buffer (get-buffer-create "*cody events*")
              (cody-event-log-mode)))
        (error (cody--log "Failed to activate cody-event-log-mode: %s"
                          (error-message-string err)))))))

@@ -1,8 +1,0 @@
-Name: erase document
-Point-Char: @
-=-=
-class Foo {
-  @System.out.println("hello there!")
-}
-=-=
-=-=-=
