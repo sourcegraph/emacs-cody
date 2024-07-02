@@ -555,17 +555,17 @@ usually means communication with the backend is down.")
   (truncate (* 0.85 (frame-char-height))))
 
 (defvar-local cody--mode-line-icon-evaluator
-  '(:eval (condition-case err
-              (when cody-mode
-                (let ((icon
-                       (cl-case cody--buffer-state
-                         (active (cody--icon-cody-logo-small))
-                         (inactive (cody--icon-logo-monotone))
-                         (error (cody--icon-logo-disabled))
-                         (ignored (cody--icon-logo-disabled))
-                         (otherwise nil))))
-                  (cody--decorate-mode-line-lighter icon)))
-            (error (cody--log "Error in mode line evaluator: %s" err))))
+    '(:eval (condition-case err
+                (when cody-mode
+                  (let ((icon
+                         (cl-case cody--buffer-state
+                           (active (cody--icon-cody-logo-small))
+                           (inactive (cody--icon-logo-monotone))
+                           (error (cody--icon-logo-disabled))
+                           (ignored (cody--icon-logo-disabled))
+                           (otherwise nil))))
+                    (cody--decorate-mode-line-lighter icon)))
+              (error (cody--log "Error in mode line evaluator: %s" err))))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
@@ -1099,23 +1099,27 @@ Current buffer is visiting the document under consideration."
         (cody--notify-doc-did-open)))))
 
 (defun cody--handle-selection-change ()
-  "Handle changes in the selection or region."
-
-  ;; To CHOP:
-  ;;  - fix this to hide the completion only if point has gone off the line
-  ;;  - maybe have design discussion first
-  ;;  - you may need to have it implement a function returning the line of the current overlay
-
-  ;; (when (cody--overlay-visible-p)
-  ;;   (cody--completion-hide))
-
-  (cody--completion-start-timer)
+  "Handle changes in the selection or region.
+If point has moved off an overlay line, hide the completion and start a timer."
   (let ((current-selection (cody--selection-get-current)))
     (unless (equal current-selection cody--last-selection)
       (setq cody--last-selection current-selection)
       (condition-case err
-          (cody--notify-doc-did-focus)
+          (progn
+            (unless (cody--point-on-overlay-line-p)
+              (when (cody--overlay-visible-p)
+                (cody--completion-hide))
+              (cody--completion-start-timer))
+            (cody--notify-doc-did-focus))
         (error (cody--log "Error in `cody--handle-selection-change': %s" err))))))
+
+(defun cody--point-on-overlay-line-p ()
+  "Return non-nil if point is on same line as a completion overlay fragment."
+  (let ((point-line (line-number-at-pos (point))))
+    (cl-some (lambda (overlay)
+               (let ((overlay-line (line-number-at-pos (overlay-start overlay))))
+                 (= point-line overlay-line)))
+             cody--overlay-deltas)))
 
 (defun cody--buffer-init-state ()
   "Initialize `cody--buffer-state' for the current buffer.
