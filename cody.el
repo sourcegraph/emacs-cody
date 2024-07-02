@@ -2102,6 +2102,24 @@ Returns an alist where each element is (GROUP . VARIABLES)."
       (message "Cody is running! Try `M-x cody-chat' to get started.")
     (message "Cody is not running. 'M-x cody-login' to start hacking.")))
 
+(defun cody-switch-workspace ()
+  "Switch Cody's workspace root directory.
+Prompts for a new directory, defaulting to the repo root of the current file
+(if found), or the current file's directory, or default-directory. Notifies
+the agent about the configuration change."
+  (interactive)
+  (let* ((current-file (buffer-file-name (current-buffer)))
+         (repo-root (or (and current-file
+                             (cody--get-repo-root-path
+                              (project-current) current-file))
+                        (and current-file
+                             (file-name-directory current-file))
+                        (cody--workspace-root)))
+         (new-root (read-directory-name "Select new workspace root: " repo-root)))
+    (when (and new-root (file-directory-p new-root))
+      (cody--set-workspace-root new-root)
+      (message "Workspace root changed to: %s" new-root))))
+
 ;;; Telemetry
 
 (defun cody--completion-update-timestamp (property)
