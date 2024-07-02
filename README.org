@@ -39,7 +39,6 @@ You can create a Sourcegraph access token at https://sourcegraph.com/users/yourn
   (add-to-list 'load-path (expand-file-name "~/my/path/to/emacs-cody"))
 
   (use-package cody
-    :straight nil
     :commands (cody-login cody-restart cody-chat cody-mode)
     ;; Some common key bindings.
     :bind (("C-M-n" . cody-completion-cycle-next-key-dispatch)
