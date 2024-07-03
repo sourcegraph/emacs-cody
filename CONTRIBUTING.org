@@ -7,7 +7,7 @@ Cody Emacs Plugin.
 ** Issues / Bugs 
 
 New issues and feature requests can be filed through
-our [issue tracker](https://github.com/sourcegraph/emacs-cody/issues/new/choose).
+our [[issue tracker][https://github.com/sourcegraph/emacs-cody/issues/new/choose]]
 
 ** Development
 
@@ -18,7 +18,7 @@ our [issue tracker](https://github.com/sourcegraph/emacs-cody/issues/new/choose)
 - Set up the Cody agent local build environment.
   - Clone `https://github.com/sourcegraph/cody` in a sibling directory.
     - Install its dependencies. The easiest way
-      is [with `asdf`](https://github.com/sourcegraph/cody/blob/main/doc/dev/index.md).
+      is [[with `asdf`][https://github.com/sourcegraph/cody/blob/main/doc/dev/index.md]].
       If not using `asdf`, you just need to install the dependency versions listed
       in the `.tool-versions` file in that repository.
     - From the root directory of the repository, `cd ./agent && pnpm install && pnpm build`
@@ -34,8 +34,8 @@ to rebuild and re-copy the distribution files into `./dist/`
 
 *** Tree-sitter grammars
 
-Cody uses (tree-sitter)[https://tree-sitter.github.io/tree-sitter/] for improving
-its responses in various ways. You should consider the WASM files for at least the
+Cody uses [[tree-sitter][https://tree-sitter.github.io/tree-sitter/]] for improving
+its responses in various ways. You should consider at least the WASM files for the
 languages you use regularly with Cody to be essential for getting the best results.
 
 We don't currently distribute the WASM files due to their size. They appear as
@@ -50,7 +50,7 @@ The integration tests are runnable from the command line via:
 eask test buttercup
 ```
 
-You can install eask with a (single npm command)[https://emacs-eask.github.io/Getting-Started/Quick-Start/]:
+You can install eask with a [[single npm command][https://emacs-eask.github.io/Getting-Started/Quick-Start/]]:
 
 ```
 npm install -g @emacs-eask/cli
