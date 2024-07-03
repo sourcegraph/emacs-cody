@@ -125,7 +125,10 @@ Returned format: github.com:sourcegraph/sourcegraph.git"
   "Get the remote branch name for PROJECT and FILE."
   (let ((repository (vc-call-backend (vc-backend file) 'root file)))
     (when (and repository (eq (cody--get-vcs-type project file) 'git))
-      (vc-git-working-revision repository))))
+      (with-temp-buffer
+        (let ((default-directory repository))
+          (when (zerop (process-file "git" nil t nil "rev-parse" "--abbrev-ref" "HEAD"))
+            (string-trim (buffer-string))))))))
 
 (defun cody--get-vcs-type (project file)
   "Get the VCS type for PROJECT and FILE."
@@ -143,6 +146,7 @@ Returned format: github.com:sourcegraph/sourcegraph.git"
     (when repo
       (expand-file-name repo))))
 
+;; TODO: This is now a graphql call to get the source of truth, since admins can tweak it.
 (defun cody--convert-git-clone-url-to-codebase-name (url)
   "Convert Git clone URL to codebase name or raise an error."
   (let* ((url (downcase url))
