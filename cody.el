@@ -103,7 +103,7 @@ If nil, no messages are printed when cycling is available or used."
   :type 'boolean)
 
 (defcustom cody-default-branch-name "main"
-  "Default branch name for the current projectp."
+  "Default branch name for the current project."
   :group 'cody
   :type 'string)
 
@@ -136,7 +136,7 @@ This is a setting for contributors to Cody-Emacs."
 
 (defcustom cody--dev-remote-agent-port 3113
   "The port on which to attach to a remote Agent.
-The remote Agent is typically started by an IDE such as VS code,
+The remote Agent is typically started by an IDE such as VS Code,
 and enables you to set breakpoints on both sides of the protocol."
   :group 'cody-dev
   :type 'number)
@@ -157,7 +157,7 @@ Sends this flag as part of the agent extension configuration."
 (defcustom cody--dev-panic-on-doc-desync nil
   "Non-nil to ask the Agent to panic if we discover it is desynced.
 De-syncing is when the Agent's copy of a document is out of sync with
-the actual document in Emacs. Setting this customn variable to non-nil,
+the actual document in Emacs. Setting this custom variable to non-nil,
 which should only be done in development, sends extra metadata along
 with document changes, which the Agent will compare against."
   :group 'cody-dev
@@ -659,7 +659,6 @@ and returns it."
           (make-instance
            'jsonrpc-process-connection
            :name "cody"
-           :events-buffer-config nil
            :notification-dispatcher #'cody--handle-agent-notification
            :process
            (if cody--dev-use-remote-agent
