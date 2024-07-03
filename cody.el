@@ -333,6 +333,8 @@ Symbol properties are used reduce namespace clutter.")
            'jsonrpc-process-connection
            :name "cody"
            :events-buffer-scrollback-size nil
+           ;; TODO: add :events-buffer-config back in conditionally if available
+           ;; This will fix a warning on every test we run with buttercup.
            :notification-dispatcher #'cody--handle-agent-notification
            :process (make-process
                      :name "cody"
