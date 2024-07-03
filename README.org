@@ -12,18 +12,22 @@ Cody uses a distributed copy of the Cody agent as compressed javascript, but
 you can override this by specifying the location of the agent binary, e.g.:
 
 #+begin_src emacs-lisp
-   (setq cody--agent-binary
-         "/path/to/eg/cody/agent/dist/agent-macos-arm64")
+ (setq cody--agent-binary "/path/to/eg/cody/agent/dist/agent-macos-arm64")
 #+end_src
 
 ** Access token
 
-Fetches your access token via auth-source and hardcodes the instance
-and codebase. You can currently bypass this by setting your access
-token directly:
+Add to your ~/.authinfo.gpg something that looks like
+
+#+begin_src authinfo
+machine `cody--sourcegraph-host' login apikey password sgp_SECRET
+#+end_src
+
+You can bypass this check by setting your access token directly,
+though this is less secure
 
 #+begin_src emacs-lisp
-  (setq cody--access-token "sgp_etc")
+(setq cody--access-token "sgp_etc")
 #+end_src
 
 To try it out, evaluate the buffer and `M-x cody-login'.
@@ -47,84 +51,16 @@ You can create a Sourcegraph access token at https://sourcegraph.com/users/yourn
            ("C-M-g" . cody-quit-key-dispatch))
     :init
     (setq cody--sourcegraph-host "sourcegraph.com") ; for clarity; this is the default.
-    (setq cody--access-token "sgp_asdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdfasdf")
+    (setq cody--access-token "sgp_asldkfjalsdkjfaslkdjfalsdkfj")
     (setopt cody-workspace-root "/your/path/to/some/project/dir") ; optional
-    (setenv "MOCK_RG_PATH" "/opt/homebrew/bin/rg") ; ripgrep
     :config
     (defalias 'cody-start 'cody-login))
 #+end_src  
 
 * Available commands
 
-  `M-x cody` will start Cody and prompt you with available commands
-  `M-x cody-chat` will pop you immediately into the Q&A command
+Autocompletion is the main use case for now. Chat is just a stub.
 
-Chat is just a stub for now.
-
-* Debugging
-p
-  `M-x cody-login` to start and initialize the agent without doing a command
-  `M-x cody-force-unload` to tear everything down
-
-#+begin_src emacs-lisp
-  (load-file "cody.el")
-  
-  (cody--request 'recipes/list)
-  (cody--request 'recipes/execute
-                 :id "code-question"
-                 :humanChatInput "Does cody work in emacs?")
-#+end_src
-
-You can view the output by switching to the =*cody output*= and
-=*cody events*= buffer. You can also see debugging messages in the
-=*cody log*= buffer.
-
-You can shut down the connection with =*M-x cody-shutdown*=, or shut
-it down and remove all traces with =*M-x cody-force-unload*=.
-
-Alternatively run =list-processes= and select the buffer. You can also
-shut down cody by hitting =d= on the cody process.
-
-
-* Attaching with a Debugger
-
-Start by binding =*cody-agent-command*= to a list like this one,
-which points to the path of the agent that you have cloned.
-
-#+begin_src emacs-lisp
-  (setq cody-agent-command
-        (list "node"
-              "/Users/stevey/src/sg/cody/agent/dist/index.js"
-              ""))
-#+end_src
-
-This will allow you to rebuild and reattach in a tight dev loop.
-
-Restart Cody, e.g. with =*M-x cody-restart*=, and then verify that
-Cody is running the version of the agent in =*cody-agent-command*=.
-
-#+begin_src sh
-   $ ps aux | grep node
-   yourself 31174Ss 4:08PM ~/.asdf/installs/nodejs/20.4.0/bin/node \
-          ~/src/sg/cody/agent/dist/index.js 
-#+end_src
-
-To have it listen for the debugger to attach, you can either run
-the script =*./bin/debug-cody*=, or send the sigusr1 to the pid of
-the node process yourself like so:
-
-#+begin_src sh
-  $ kill -USR1 31174
-#+end_src
-
-Either way, your Agent should now be listening for a debugger.
-
-Now you can attach with =*chrome://inspect*= or with VSCode's debugger.
-VSCode is recommended, as it seems to connect more reliably - use the
-built-in configuration =*Debug: Attach to Node Process=*.
-
-You should also =*(setq jsonrpc-default-request-timeout 500)*= to ensure
-that the jsonrpc calls don't time out while you're paused at breakpoints.
-
-N.B. Everything stops when the debugger is stopped at a breakpoint,
-as Emacs concurrency is cooperative.
+- `M-x cody-login` will start Cody up and apply it to applicable buffers.
+- `M-x cody-logout` shuts Cody down.
+- `M-x cody-mode` toggles Cody on and off in a given buffer.
