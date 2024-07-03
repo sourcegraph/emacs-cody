@@ -1,0 +1,126 @@
+* Contributing to the Sourcegraph Cody Emacs Plugin
+
+Thank you for your interest in contributing to Sourcegraph! The goal of this
+document is to provide a high-level overview of how you can contribute to the
+Cody Emacs Plugin.
+
+** Issues / Bugs 
+
+New issues and feature requests can be filed through
+our [[issue tracker][https://github.com/sourcegraph/emacs-cody/issues/new/choose]]
+
+** Development
+
+*** Prerequisites
+
+- Ensure that you have node.js installed.
+  - Current min version is 20.4.0.
+- Set up the Cody agent local build environment.
+  - Clone `https://github.com/sourcegraph/cody` in a sibling directory.
+    - Install its dependencies. The easiest way
+      is [[with `asdf`][https://github.com/sourcegraph/cody/blob/main/doc/dev/index.md]].
+      If not using `asdf`, you just need to install the dependency versions listed
+      in the `.tool-versions` file in that repository.
+    - From the root directory of the repository, `cd ./agent && pnpm install && pnpm build`
+- Run `node ./scripts/build.js` to rebuild the agent and copy the distribution.
+  - This handles running `pnpm build && pnpm install` in the sibling cody repo,
+    and copying the result into the dist/ subdirectory.
+
+*** Dev loop
+
+Once you have it working, working, then any time you make changes to (or
+update) the agent in the sibling `cody` directory, you can re-run `node ./scripts/build.js`
+to rebuild and re-copy the distribution files into `./dist/`
+
+*** Tree-sitter grammars
+
+Cody uses [[tree-sitter][https://tree-sitter.github.io/tree-sitter/]] for improving
+its responses in various ways. You should consider at least the WASM files for the
+languages you use regularly with Cody to be essential for getting the best results.
+
+We don't currently distribute the WASM files due to their size. They appear as
+artifacts of the build of the agent, in `../cody/agent/dist/`. You can copy them
+all over to `./dist` using the `./build.js` script.
+
+* Debugging
+
+- `M-x cody-login` to start and initialize the agent without doing a command
+- `M-x cody-force-unload` to tear everything down
+
+```
+#+begin_src emacs-lisp
+  (load-file "cody.el")
+  
+  (cody--request 'recipes/list)
+  (cody--request 'recipes/execute
+                 :id "code-question"
+                 :humanChatInput "Does cody work in emacs?")
+#+end_src
+
+You can view the output by switching to the =*cody output*= and
+=*cody events*= buffer. You can also see debugging messages in the
+=*cody log*= buffer.
+
+You can shut down the connection with =*M-x cody-shutdown*=, or shut
+it down and remove all traces with =*M-x cody-force-unload*=.
+
+Alternatively run =list-processes= and select the buffer. You can also
+shut down cody by hitting =d= on the cody process.
+
+
+* Attaching with a Debugger
+
+Start by binding =*cody-agent-command*= to a list like this one,
+which points to the path of the agent that you have cloned.
+
+#+begin_src emacs-lisp
+  (setq cody-agent-command
+        (list "node"
+              "/Users/stevey/src/sg/cody/agent/dist/index.js"
+              ""))
+#+end_src
+
+This will allow you to rebuild and reattach in a tight dev loop.
+
+Restart Cody, e.g. with =*M-x cody-restart*=, and then verify that
+Cody is running the version of the agent in =*cody-agent-command*=.
+
+#+begin_src sh
+   $ ps aux | grep node
+   yourself 31174Ss 4:08PM ~/.asdf/installs/nodejs/20.4.0/bin/node \
+          ~/src/sg/cody/agent/dist/index.js 
+#+end_src
+
+To have it listen for the debugger to attach, you can either run
+the script =*./bin/debug-cody*=, or send the sigusr1 to the pid of
+the node process yourself like so:
+
+#+begin_src sh
+  $ kill -USR1 31174
+#+end_src
+
+Either way, your Agent should now be listening for a debugger.
+
+Now you can attach with =*chrome://inspect*= or with VSCode's debugger.
+VSCode is recommended, as it seems to connect more reliably - use the
+built-in configuration =*Debug: Attach to Node Process=*.
+
+You should also =*(setq jsonrpc-default-request-timeout 500)*= to ensure
+that the jsonrpc calls don't time out while you're paused at breakpoints.
+
+N.B. Everything stops when the debugger is stopped at a breakpoint,
+as Emacs concurrency is cooperative.
+
+* Integration Testing
+
+The integration tests are runnable from the command line via:
+
+```
+eask test buttercup
+```
+
+You can install eask with a [[single npm command][https://emacs-eask.github.io/Getting-Started/Quick-Start/]]:
+
+```
+npm install -g @emacs-eask/cli
+```

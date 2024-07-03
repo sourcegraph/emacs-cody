@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+
+# Find the Cody agent node process and send it a kill -USR1
+
+listing = `ps aux | grep node | grep dist/cody-agent.js | grep -v grep`
+
+if listing.empty?
+  puts "Couldn't find process pid"
+  exit 1
+end
+
+pid = listing.split[1]
+
+cmd = "kill -USR1 #{pid}"
+puts cmd
+puts "Cody Agent listening for debugger"
+exec cmd
