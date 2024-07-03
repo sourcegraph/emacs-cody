@@ -23,6 +23,8 @@ our [issue tracker](https://github.com/sourcegraph/emacs-cody/issues/new/choose)
       in the `.tool-versions` file in that repository.
     - From the root directory of the repository, `cd ./agent && pnpm install && pnpm build`
 - Run `node ./scripts/build.js` to rebuild the agent and copy the distribution.
+  - This handles running `pnpm build && pnpm install` in the sibling cody repo,
+    and copying the result into the dist/ subdirectory.
 
 *** Dev loop
 
@@ -45,5 +47,11 @@ all over to `./dist` using the `./build.js` script.
 The integration tests are runnable from the command line via:
 
 ```
-eask test ert
+eask test buttercup
+```
+
+You can install eask with a (single npm command)[https://emacs-eask.github.io/Getting-Started/Quick-Start/]:
+
+```
+npm install -g @emacs-eask/cli
 ```
