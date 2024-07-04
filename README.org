@@ -1,10 +1,16 @@
 #+TITLE: cody.el: Sourcegraph Cody in Emacs
 
-Do not use this yet; it is in development.
+Feel free to use it experimentally.
 
 * Status
 
-- completely broken at the moment from all the protocol changes
+Completions should be working now. You should see completions in
+your active workspace, which is the value of `cody--workspace-root',
+typically the repo root for that workspace.
+
+Cody currently supports one active workspace at a time. Files in the
+currently active workspace have a color Cody icon, and others are
+monochrome. You can also see the active workspace in `M-x cody-dashboard'.
 
 * Configuration
 
