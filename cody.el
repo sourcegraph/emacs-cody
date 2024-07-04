@@ -555,17 +555,7 @@ usually means communication with the backend is down.")
   (truncate (* 0.85 (frame-char-height))))
 
 (defvar-local cody--mode-line-icon-evaluator
-    '(:eval (condition-case err
-                (when cody-mode
-                  (let ((icon
-                         (cl-case cody--buffer-state
-                           (active (cody--icon-cody-logo-small))
-                           (inactive (cody--icon-logo-monotone))
-                           (error (cody--icon-logo-disabled))
-                           (ignored (cody--icon-logo-disabled))
-                           (otherwise nil))))
-                    (cody--decorate-mode-line-lighter icon)))
-              (error (cody--log "Error in mode line evaluator: %s" err))))
+  '(:eval (cody--evaluate-mode-line-icon))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
@@ -932,8 +922,24 @@ it indicates that the icon works for both light and dark themes."
                    `(define-cached-icon ,name t))
                  fixed-icons))))
 
-;; Execute the macro to create the necessary functions
+;; Execute the macro to create the necessary functions; e.g.,
+;; `cody--logo-cody-logo-small'. They load their images lazily.
 (create-icon-functions)
+
+(defun cody--evaluate-mode-line-icon ()
+  "Decide the mode line icon based on the current buffer state."
+  (condition-case err
+      ;; TODO: Race condition where our macro hasn't been called yet(?)
+      (when (and cody-mode (symbol-function 'cody--icon-cody-logo-small))
+        (let ((icon
+               (cl-case cody--buffer-state
+                 (active (cody--icon-cody-logo-small))
+                 (inactive (cody--icon-logo-monotone))
+                 (error (cody--icon-logo-disabled))
+                 (ignored (cody--icon-logo-disabled))
+                 (otherwise nil))))
+          (cody--decorate-mode-line-lighter icon)))
+    (error (cody--log "Error in mode line evaluator: %s" err))))
 
 (defun cody--mode-line-click (_event)
   "Handle mouse click EVENT on Cody mode line item."
@@ -943,8 +949,7 @@ it indicates that the icon works for both light and dark themes."
 (defun cody-propertize-icon (text-or-image)
   "Return propertized string or image for `cody--minor-mode-icon`.
 Argument TEXT-OR-IMAGE is the string or image to propertize."
-  (let ((buffer-state (buffer-local-value 'cody--buffer-state (current-buffer)))
-        (help-echo (if cody--buffer-state
+  (let ((help-echo (if cody--buffer-state
                        (format "Cody mode (%s) - click for menu" cody--buffer-state)
                      "Cody mode - click for menu")))
     (propertize (if (stringp text-or-image) text-or-image " ")
@@ -1503,12 +1508,14 @@ Query and output go into the *cody-chat* buffer."
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (when-let* ((active (cody--mode-active-p))
-              (o (car-safe cody--overlay-deltas))
-              (_ (overlayp o))
-              (_ (overlay-buffer o)) ; overlay is positioned/visible somewhere
-              (_ (cody--cc))) ; not a zombie
-    t))
+  (condition-case err
+      (when-let* ((active (cody--mode-active-p))
+                  (o (car-safe cody--overlay-deltas))
+                  (_ (overlayp o))
+                  (_ (overlay-buffer o)) ; overlay is positioned/visible somewhere
+                  (_ (cody--cc))) ; not a zombie
+        t)
+    (error (cody--log "Error in cody--overlay-visible-p: %s" err))))
 
 (defun cody--make-overlay (text pos)
   "Create a new overlay for displaying part of a completion suggestion.
@@ -2103,23 +2110,52 @@ Returns an alist where each element is (GROUP . VARIABLES)."
 
 (defun cody-switch-workspace ()
   "Switch Cody's workspace root directory.
+
 Prompts for a new directory, defaulting to the repo root of the current file
 (if found), or the current file's directory, or default-directory. Notifies
-the agent about the configuration change."
-  (interactive)
-  (let* ((current-file (buffer-file-name (current-buffer)))
-         (repo-root (or (and current-file
-                             (cody--get-repo-root-path
-                              (project-current) current-file))
-                        (and current-file
-                             (file-name-directory current-file))
-                        (cody--workspace-root)))
-         (new-root (read-directory-name "Select new workspace root: " repo-root)))
-    (when (and new-root (file-directory-p new-root))
-      (cody--set-workspace-root new-root)
-      (message "Workspace root changed to: %s" new-root))))
+the agent about the configuration change.
 
-;;; Telemetry
+Note that this command will go away when we support multiple workspaces."
+  (interactive)
+  (if (not (cody--mode-active-p))
+      (message "Log in to Cody in order to use this command")
+    (let* ((current-file (buffer-file-name (current-buffer)))
+           (repo-root (or (and current-file
+                               (cody--get-repo-root-path
+                                (project-current) current-file))
+                          (and current-file
+                               (file-name-directory current-file))
+                          (cody--workspace-root)))
+           (new-root (read-directory-name "Select new workspace root: " repo-root)))
+      (cond
+       ((or (not new-root) (not (file-directory-p new-root)))
+        (message "Invalid directory selected."))
+       ((string-equal new-root (cody--workspace-root))
+        (message "Already at the specified workspace root: %s" new-root))
+       (t
+        ;; Triggers textDocument/didClose notifications to Agent.
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (and (bound-and-true-p cody-mode)
+                       (eq cody--buffer-state 'active))
+              (cody-mode -1))))
+
+        ;; TODO: See if this triggers setWorkspaceDocuments in vscode-shim.ts:
+        (cody--set-workspace-root new-root)
+
+        ;; Triggers textDocument/didOpen notifications to Agent.
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (and (not (bound-and-true-p cody-mode)) ;; Ensure cody-mode is not already active
+                       (eq (cody--workspace-root) new-root))
+
+              ;; TODO: Only do this if the buffer is whitelisted for Cody.
+              ;;  - TODO: use a standard mechanism for this
+
+              (cody-mode 1))))
+        (message "Workspace root changed to: %s" new-root))))))
+
+;; TODO: Switch to telemetry v2.
 
 (defun cody--completion-update-timestamp (property)
   "Set the given timestamp named PROPERTY to the current time."

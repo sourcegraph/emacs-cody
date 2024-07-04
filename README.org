@@ -30,9 +30,7 @@ though this is less secure
 (setq cody--access-token "sgp_etc")
 #+end_src
 
-To try it out, evaluate the buffer and `M-x cody-login'.
-
-TODO: gnugpg and/or local host keychain support
+To try it out, evaluate the buffer and `M-x cody-login`.
 
 ** Sample Configuration
 
