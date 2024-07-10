@@ -125,6 +125,11 @@ If nil, Cody will search for node using variable `exec-path'."
   :group 'cody-dev
   :type 'string)
 
+(defcustom cody-max-workspaces 1
+  "Maximum number of active workspace connections Cody will create.
+Each workspace connection spins up its own Cody agent subprocess.
+You can view all Cody workspaces with `cody-dashboard'.")
+
 (defcustom cody-use-remote-agent nil
   "Non-nil to connect to an agent running on `cody--dev-remote-agent-port`.
 This is a setting for contributors to Cody-Emacs."
@@ -153,9 +158,12 @@ Sends this flag as part of the agent extension configuration."
 (defcustom cody-panic-on-doc-desync nil
   "Non-nil to ask the Agent to panic if we discover it is desynced.
 De-syncing is when the Agent's copy of a document is out of sync with
-the actual document in Emacs. Setting this custom variable to non-nil,
-which should only be done in development, sends extra metadata along
-with document changes, which the Agent will compare against."
+the actual document in Emacs.
+
+Setting this custom variable to non-nil, which should only be done in
+development, sends extra metadata along with document changes, which the
+Agent will compare against. Performance will be heavily impacted, with
+the entire buffer being sent to Agent on every small change."
   :group 'cody-dev
   :type 'boolean)
 
@@ -539,7 +547,7 @@ can only be sent while the document state is `opened'.")
     (define-key map [mode-line mouse-1] 'cody--mode-line-click)
     (easy-menu-define cody-mode-menu map "Cody Mode Menu"
       '("Cody"
-        ["Say Hello" (message "Hello from Cody!")]
+        ["Dashboard" (cody-dashboard)]
         ["Turn Off" cody-mode]
         ["Help" (describe-function 'cody-mode)]))
     map)
@@ -873,15 +881,19 @@ Returns a `cody-server-info' instance."
   "Wrapper for `jsonrpc-request' that makes it testable."
   (unless (or cody--unit-testing-p (cody--error-p))
     (condition-case err
-        (apply #'jsonrpc-request (cody--connection) method params args)
+        (if-let ((connection (cody--connection)))
+            (apply #'jsonrpc-request (cody--connection) method params args)
+          (cody--log "Skipped sending %s: null connection" method))
       (error (cody--log "Unable to send request %s: %s" method err)))))
 
 (defun cody--notify (method params &rest args)
   "Helper to send a Cody request for METHOD with PARAMS."
   (unless (or cody--unit-testing-p (cody--error-p))
     (condition-case err
-        (apply #'jsonrpc-notify (cody--connection) method params args)
-      (error (cody--log "Unable to send notification %s: %s" method err)))))
+        (if-let ((connection (cody--connection)))
+            (apply #'jsonrpc-notify connection method params args)
+          (cody--log "Skipped sending notification %s: null connection" method))
+      (error (cody--log "Unable to send %s: %s" method err)))))
 
 (defun cody--check-node-version ()
   "Signal an error if the default node.js version is too low.
@@ -1409,7 +1421,8 @@ the project root cannot be determined from the visited file path."
                      (buffer-or-file
                       (file-name-directory buffer-or-file))
                      (t default-directory)))
-                   (root (project-root (project-current))))
+                   (project (project-current))
+                   (root (when project (project-root project))))
               (and root (expand-file-name root)))
           (error
            (cody--log "Error determining project root: %s" err)
@@ -1443,11 +1456,14 @@ Defaults to the current workspace."
   "Get or create the `cody-workspace' struct for the current project root.
 Does not initialize a connection. If BUFFER is passed, uses its workspace root.
 Return nil if there is no workspace root for the current buffer."
-  (when-let ((workspace-root (cody--workspace-root buffer)))
+  (when-let ((workspace-root (cody--workspace-root buffer))
+             (count (hash-table-count cody-workspaces)))
     (or (gethash workspace-root cody-workspaces)
-        (puthash workspace-root (make-cody-workspace :root workspace-root
-                                                     :uri (cody--uri-for workspace-root))
-                 cody-workspaces))))
+        (when (< count cody-max-workspaces)
+          (puthash workspace-root (make-cody-workspace
+                                   :root workspace-root
+                                   :uri (cody--uri-for workspace-root))
+                   cody-workspaces)))))
 
 (defun cody--garbage-collect-workspaces ()
   "Garbage collect workspaces that have no active buffers."
@@ -1765,7 +1781,7 @@ the default binding."
   "Handler for `keyboard-quit'; clears the completion suggestion.
 Also calls the default key binding."
   (interactive)
-  (cody--call-if-at-overlay 'cody--completion-discard)
+  (cody--completion-discard)
   ;; Also call default binding.
   (let (cody-mode) ; avoid recursion
     (call-interactively (key-binding (this-command-keys)))))
