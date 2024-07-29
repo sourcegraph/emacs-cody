@@ -1,4 +1,4 @@
-;;; cody.el --- Sourcegraph Cody in Emacs -*- lexical-binding: t; -*-
+;; cody.el --- Sourcegraph Cody in Emacs -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023 Sourcegraph, Inc.
 
@@ -9,12 +9,11 @@
 ;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "20240201.2318"))
 ;; Keywords: completion convenience languages programming tools
 
+;; This file is not part of GNU Emacs.
+
 ;;; Commentary:
 ;;
-;; Make sure your nodejs "node" executable is in your Emacs `exec-path'.
-;;
-;; Add something like `(add-hook 'prog-mode-hook 'cody-mode)' to start
-;; cody automatically in new code buffers after logging into Cody.
+;; See ./README.org for installation information.
 ;;
 ;; `M-x cody-login` to start using Cody.
 
@@ -28,27 +27,25 @@
 (require 'ansi-color)
 (require 'cody-diff)
 (require 'cody-repo-util)
+(require 'cody-dashboard)
 
 ;;; Custom variables.
 
 (defgroup cody nil
-  "Sourcegraph Cody."
+  "Sourcegraph Cody settings."
   :group 'programming
   :prefix "cody-")
 
-(defcustom cody-telemetry-enable-p t
+(defcustom cody-telemetry-enable-p nil
   "Non-nil to allow anonymized event/usage telemetry.
-This information is used by Sourcegraph to improve the product."
+This information is used by Sourcegraph to improve Cody."
   :group 'cody
   :type 'boolean)
 
-(defcustom cody-workspace-root (getenv "HOME")
-  "Directory which Cody considers your current project root.
-You can override this to tell Cody to load up and focus on a
-specific project, or by default Cody will attempt to infer it
-from common project structures."
-  :group 'cody
-  :type 'string)
+(defcustom cody-gc-workspace-timeout-sec 15 ;; 300
+  "Time to wait before garbage collecting an unused workspace."
+  :type 'integer
+  :group 'cody)
 
 (defcustom cody--internal-anonymized-uuid nil
   "A generated ID for telemetry, to tie usage events together.
@@ -115,51 +112,60 @@ If nil, no messages are printed when cycling is available or used."
 (defgroup cody-dev nil
   "Cody developer/contributor configuration settings."
   :group 'cody
-  :prefix "cody--dev-")
+  :prefix "cody-dev-")
 
-(defcustom cody--dev-node-executable nil
+(defcustom cody-node-executable nil
   "Hardwired path to the nodejs binary to use for Cody.
 If nil, Cody will search for node using variable `exec-path'."
   :group 'cody
   :type 'string)
 
-(defcustom cody--dev-node-min-version "20.4.0"
+(defcustom cody-node-min-version "20.4.0"
   "The minimum required version of Node.js."
   :group 'cody-dev
   :type 'string)
 
-(defcustom cody--dev-use-remote-agent nil
+(defcustom cody-max-workspaces 1
+  "Maximum number of active workspace connections Cody will create.
+Each workspace connection spins up its own Cody agent subprocess.
+You can view all Cody workspaces with `cody-dashboard'."
+  :type 'number
+  :group 'cody-dev)
+
+(defcustom cody-use-remote-agent nil
   "Non-nil to connect to an agent running on `cody--dev-remote-agent-port`.
 This is a setting for contributors to Cody-Emacs."
   :group 'cody-dev
   :type 'boolean)
 
-(defcustom cody--dev-remote-agent-port 3113
+(defcustom cody-remote-agent-port 3113
   "The port on which to attach to a remote Agent.
 The remote Agent is typically started by an IDE such as VS Code,
 and enables you to set breakpoints on both sides of the protocol."
   :group 'cody-dev
   :type 'number)
 
-;; TODO: When this value changes, if cody is alive, notify the agent.
-(defcustom cody--dev-enable-agent-debug-p nil
+(defcustom cody-enable-agent-debug nil
   "Non-nil to enable debugging in the agent.
 Sends this flag as part of the agent extension configuration."
   :group 'cody-dev
   :type 'boolean)
 
-(defcustom cody--dev-enable-agent-debug-verbose-p nil
+(defcustom cody-enable-agent-debug-verbose nil
   "Non-nil to enable verbose debugging in the agent.
 Sends this flag as part of the agent extension configuration."
   :group 'cody-dev
   :type 'boolean)
 
-(defcustom cody--dev-panic-on-doc-desync nil
+(defcustom cody-panic-on-doc-desync nil
   "Non-nil to ask the Agent to panic if we discover it is desynced.
 De-syncing is when the Agent's copy of a document is out of sync with
-the actual document in Emacs. Setting this custom variable to non-nil,
-which should only be done in development, sends extra metadata along
-with document changes, which the Agent will compare against."
+the actual document in Emacs.
+
+Setting this custom variable to non-nil, which should only be done in
+development, sends extra metadata along with document changes, which the
+Agent will compare against. Performance will be heavily impacted, with
+the entire buffer being sent to Agent on every small change."
   :group 'cody-dev
   :type 'boolean)
 
@@ -395,8 +401,26 @@ Argument CC is the completion object."
                     "dist" "index.js")
   "Path to bundled cody agent.")
 
-(defconst cody--dev-node-min-version "20.4.0"
-  "The minimum required version of node.js for Cody.")
+;; It might seem odd to have a separate Node process for each workspace,
+;; but it makes things more flexible in general; e.g. integration testing
+;; without interfering with your normal Cody session, or hitting dev backends.
+;; Other Cody clients (e.g. JetBrains) also have per-workspace agents.
+(cl-defstruct cody-workspace
+  "Data associated with a workspace root and its connection.
+Each Cody-enabled workspace has a separate Agent instance."
+  (root (getenv "HOME") :type string)
+  (uri (cody--uri-for (getenv "HOME")) :type string)
+  (connection nil :type (or null jsonrpc-process-connection))
+  (server-info nil :type (or null cody-server-info))
+  ;; Possible values are: `unconnected', `connected', `error', 'closed'.
+  (status 'unconnected :type symbol)
+  (error nil :type (or null string)) ; last error encountered
+  (events-buffer nil :type (or null buffer))
+  (stderr-buffer nil :type (or null buffer)))
+
+(defvar cody-workspaces (make-hash-table :test 'equal)
+  "Hash table mapping workspace root uris to `cody-workspace' structs.
+Workspace roots are typically repo roots.")
 
 (defvar cody--node-version-status nil
   "Non-nil after `cody--check-node-version' is called.
@@ -411,26 +435,15 @@ When testing, all calls to the agent are diverted.")
   "Set to non-nil during integration tests.
 When testing, the calls go through to the LLM.")
 
-(defvar cody--connection nil "Main jsonrpc connection to Agent.")
-
-(defvar cody--server-info nil
-  "ServerInfo struct sent from the `initialize' handshake.")
-
-(defvar cody--status 'disconnected
-  "Current status of Cody connection.
-If the status is `error', then `cody--status' will have an `error'
-property whose value is the last error received.")
-
-(defvar cody--message-in-progress nil "Chat message accumulator.")
-
 (defvar cody--sourcegraph-host "sourcegraph.com"
   "Sourcegraph host.")
 
 (defvar cody--access-token nil
   "Access token for `cody--sourcegraph-host'.")
 
-(defconst cody-log-buffer-name "*cody-log*" "Cody log messages.")
-(defconst cody--chat-buffer-name "*cody-chat*" "Cody chat Buffer.")
+(defconst cody-log-buffer-name "*cody-log*"
+  "Cody log messages.
+This log is shared across all agent connections.")
 
 (defvar cody-prefix-map nil "Map for bindings with Cody's prefix.")
 (define-prefix-command 'cody-prefix-map)
@@ -453,18 +466,16 @@ property whose value is the last error received.")
 (defvar cody-completion-map (make-sparse-keymap)
   "Keymap for cody completion overlay.")
 
-(defvar cody--typewriter-effect nil
-  "Non-nil to use typewriter effect in Cody chat output.")
-
 (defconst cody--mode-hooks
   '((before-change-functions . cody--before-change)
     (after-change-functions . cody--after-change)
     (window-selection-change-functions . cody--handle-focus-changed)
     (window-buffer-change-functions . cody--handle-focus-changed)
     (post-command-hook . cody--post-command)
-    (kill-buffer-hook . cody--handle-doc-closed)
+    (kill-buffer-hook . cody--kill-buffer-function)
     (activate-mark-hook . cody--handle-selection-change)
-    (deactivate-mark-hook . cody--handle-selection-change))
+    (deactivate-mark-hook . cody--handle-selection-change)
+    (after-revert-hook . cody--after-revert))
   "List of buffer-local hooks that Cody registers on in `cody-mode`.
 These hooks enable it to keep buffers and selections synced
 with the Cody Agent.")
@@ -489,36 +500,21 @@ Each time we request a new completion, it gets discarded and replaced.")
 (defvar cody--completion-timestamps nil
   "Tracks event timestamps for telemetry, as plist properties.")
 
+(defvar cody--connection-global-error nil
+  "Non-nil when Cody fails to start an Agent subprocess.
+Until this flag is cleared, it will not attempt to create any
+new Agent processes.")
+
 (defvar cody--vars nil
   "Symbol used as scratch space for ephemeral temp variables.
 Typically used for allowing before/after hooks to communicate data.
 Symbol properties are used reduce namespace clutter.")
 
 (defvar cody-connection-initialized-hook nil
-  "Hook run after `cody--connection' initializes the connection.
-If the connection failed, then `cody--status' will be `error',
-and the symbol `cody--status' will have an `error' property.")
-
-(defvar cody--custom-variables
-  '(cody-telemetry-enable-p
-    cody-workspace-root
-    cody-completions-auto-trigger-p
-    cody-completions-display-marker-p
-    cody-completions-enable-cycling-p
-    cody-completions-cycling-help-p
-    cody-default-branch-name
-    cody-remote-url-replacements
-    cody--internal-anonymized-uuid
-    cody--dev-node-executable
-    cody--dev-node-min-version
-    cody--dev-use-remote-agent
-    cody--dev-remote-agent-port
-    cody--dev-enable-agent-debug-p
-    cody--dev-enable-agent-debug-verbose-p)
-  "List of custom variables to display in `cody-dashboard'.")
-
-(defconst cody--defgroups '(cody cody-completions cody-dev)
-  "List of Cody-related `defgroup's to include in `cody-dashboard'.")
+  "Hook run after `cody--connection' initializes a connection.
+Each workspace has its own node subprocess and jsonrpc connection,
+so this hook is run once per workspace that Cody opens.
+If the connection failed, then the workspace status field will be `error'.")
 
 (defsubst cody--timestamp ()
   "Return seconds since epoch."
@@ -532,7 +528,14 @@ If nil, the buffer's state has not yet been evaluated.  Inactive means
 its workspace is not currently live, so Cody is not tracking changes to
 the file nor using it for context. Ignored means that an admin has
 configured the file or repo to be excluded from Cody. The `error' state
-usually means communication with the backend is down.")
+usually means communication with the backend is down. The only way to
+recover from this state is to restart it with `cody-workspace-reopen'.")
+
+(defvar-local cody--buffer-document-state nil
+  "State machine to ensure that we sequence open/close/focus events.
+States: nil = unopened, `opened' = opened, and `closed' = closed/error.
+States must progress from nil -> opened -> closed, and didFocus events
+can only be sent while the document state is `opened'.")
 
 (defvar-local cody--last-selection nil
   "Stores the last known selection range to detect changes.")
@@ -544,7 +547,7 @@ usually means communication with the backend is down.")
     (define-key map [mode-line mouse-1] 'cody--mode-line-click)
     (easy-menu-define cody-mode-menu map "Cody Mode Menu"
       '("Cody"
-        ["Say Hello" (message "Hello from Cody!")]
+        ["Dashboard" (cody-dashboard)]
         ["Turn Off" cody-mode]
         ["Help" (describe-function 'cody-mode)]))
     map)
@@ -555,17 +558,7 @@ usually means communication with the backend is down.")
   (truncate (* 0.85 (frame-char-height))))
 
 (defvar-local cody--mode-line-icon-evaluator
-    '(:eval (condition-case err
-                (when cody-mode
-                  (let ((icon
-                         (cl-case cody--buffer-state
-                           (active (cody--icon-cody-logo-small))
-                           (inactive (cody--icon-logo-monotone))
-                           (error (cody--icon-logo-disabled))
-                           (ignored (cody--icon-logo-disabled))
-                           (otherwise nil))))
-                    (cody--decorate-mode-line-lighter icon)))
-              (error (cody--log "Error in mode line evaluator: %s" err))))
+    '(:eval (cody--evaluate-mode-line-icon))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
 ;; Utilities
@@ -605,13 +598,14 @@ usually means communication with the backend is down.")
 
 (defun cody--agent-command ()
   "Command and arguments for running agent."
-  (let ((node-executable (or cody--dev-node-executable (executable-find "node"))))
+  (let ((node-executable (or cody-node-executable (executable-find "node"))))
     (unless node-executable
       (error "Node.js executable not found in exec-path"))
     (list node-executable
-          "--inspect"
           "--enable-source-maps"
-          cody--cody-agent)))
+          cody--cody-agent
+          "api"
+          "jsonrpc-stdio")))
 
 ;; Add to your ~/.authinfo.gpg something that looks like
 ;;   machine `cody--sourcegraph-host' login apikey password sgp_SECRET
@@ -629,52 +623,156 @@ usually means communication with the backend is down.")
                        :host cody--sourcegraph-host
                        :require '(:secret :host))))))
 
-(defun cody--alive-p ()
-  "Return non-nil if the jsonrpc connection is still running."
+(defun cody--alive-p (&optional connection)
+  "Return non-nil if CONNECTION is a live process.
+CONNECTION defaults to the current workspace's connection, if any."
   (or cody--unit-testing-p
-      (and cody--connection
-           (cody--check-node-version)
-           (zerop (process-exit-status
-                   (jsonrpc--process cody--connection))))))
+      ;; Don't call `cody--connection' here since it will spawn one.
+      ;; Check the workspace to see if it has a live connection.
+      (when-let ((conn (or connection
+                           (when-let* ((workspace-root (cody--workspace-root))
+                                       (workspace (gethash workspace-root cody-workspaces)))
+                             (cody-workspace-connection workspace)))))
+        (let ((process (jsonrpc--process conn)))
+          (and process (zerop (process-exit-status process)))))))
 
-(defun cody--connection ()
-  "Return the agent process, starting one if it is not already running."
-  (unless (cody--alive-p)
-    (setq cody--status 'disconnected)
-    (cody--connection-create-process)
-    (if (cody--alive-p)
-        (progn
-          (cody--activate-event-log-mode)
-          (cody--initialize-connection))
-      (cody--log "Failed to start cody agent process: %s" cody--connection)
-      (setq cody--connection nil)))
-  cody--connection)
+(defun cody--connection (&optional restart-if-needed)
+  "Get or create the agent connection for the current workspace.
 
-(defun cody--connection-create-process ()
-  "Create a local or network process for talking to the agent.
-Sets the `cody--connection' variable to the resulting process,
-and returns it."
-  (let ((process-environment (cody--agent-process-environment)))
-    (setq cody--connection
-          (make-instance
-           'jsonrpc-process-connection
-           :name "cody"
-           :notification-dispatcher #'cody--handle-agent-notification
-           :process
-           (if cody--dev-use-remote-agent
-               (make-network-process
-                :name "cody"
-                :host 'local
-                :service cody--dev-remote-agent-port
-                :coding 'utf-8-emacs-unix
-                :noquery t)
-             (make-process
-              :name "cody"
-              :command (cody--agent-command)
-              :coding 'utf-8-emacs-unix
-              :connection-type 'pipe
-              :stderr (get-buffer-create "*cody stderr*")
-              :noquery t))))))
+RESTART-IF-NEEDED, if non-nil, will attempt to start or restart the
+connection if it is anything other than connected and active.
+
+Return nil if there is no connection available, either because it is
+still nil, or because it has failed in some way. Will not return a
+dead connection."
+  (let* ((workspace (cody--current-workspace))
+         (connection (and workspace (cody-workspace-connection workspace))))
+    (cond
+     ((cody--error-p) nil)
+     ((cody--alive-p connection) connection)
+     ;; All the error conditions are handled identically for now.
+     (t
+      (if (not restart-if-needed)
+          nil
+        (condition-case err
+            ;; Restart and initialize.
+            (progn
+              (setq connection
+                    (cody--connection-create-process-safe workspace))
+              ;; Required before calling `cody--initialize-connection'.
+              (setf (cody-workspace-connection workspace) connection)
+              (with-timeout (10
+                             (signal 'connection-timeout '("Timed out during handshake")))
+                (cody--initialize-connection workspace))
+              (if (cody--alive-p connection)
+                  connection
+                nil))
+          (error
+           (cody--workspace-set-error
+            (format "initializing connection: %s" err)))))))))
+
+(defun cody--connection-create-process-safe (workspace)
+  "Handle errors and timeouts around attaching to agent process for WORKSPACE.
+If `cody--connection-global-error' is non-nil, return nil immediately.
+Within a timeout of 10 seconds, attempt to create the process
+using `cody--connection-create-process'.
+Set a global error on timeout or if any other error occurs.
+Return value, if non-nil, is a `jsonrpc-process-connection'."
+  (when (not cody--connection-global-error)
+    (condition-case err
+        (with-timeout (10
+                       (signal 'connection-timeout '("Connection timed out")))
+          ;; This is the meat; everything below is error handling.
+          (cody--connection-create-process workspace))
+      (error
+       ;; Making the assumption that timing out means we'll never succeed -
+       ;; the user will have to change something and explicitly reset.
+       (when (eq (car err) 'connection-timeout)
+         (setq cody--connection-global-error 'timed-out))
+       ;; Whereas other errors _may_ only apply to this workspace, so we'll
+       ;; just flag this one as being in error.
+       (cody--workspace-set-error
+        (if cody-use-remote-agent
+            (format "Could not attach to agent on port %d: %s"
+                    cody-remote-agent-port
+                    (error-message-string err))
+          (format "Could not create process: %s"
+                  (error-message-string err)))
+        nil ; no error for format string; we already handled it.
+        workspace)
+       nil))))
+
+(defun cody--connection-create-process (workspace)
+  "Create a local or network process for talking to the agent for WORKSPACE.
+Return value is a `jsonrpc-process-connection'."
+  (let* ((workspace-root (cody-workspace-root workspace))
+         (events-buffer
+          (let ((buf (get-buffer-create (format "*cody events[%s]*"
+                                                workspace-root))))
+            (with-current-buffer buf
+              (buffer-disable-undo)
+              buf)))
+         (process-name (cody--workspace-process-name workspace))
+         (process-environment (cody--agent-process-environment))
+         (process (if cody-use-remote-agent
+                      (make-network-process
+                       :name process-name
+                       :host 'local
+                       :service cody-remote-agent-port
+                       :coding 'utf-8-emacs-unix
+                       :noquery t)
+                    (make-process
+                     :name process-name
+                     :command (cody--agent-command)
+                     :coding 'utf-8-emacs-unix
+                     :connection-type 'pipe
+                     :noquery t)))
+         (connection (make-instance
+                      'jsonrpc-process-connection
+                      :name process-name
+                      :notification-dispatcher #'cody--notification-dispatcher
+                      :process process)))
+    (setf (cody-workspace-status workspace) 'connected)
+    (setf (jsonrpc--events-buffer connection) events-buffer)
+    (setf (cody-workspace-events-buffer workspace) events-buffer)
+    (setf (cody-workspace-stderr-buffer workspace)
+          (jsonrpc-stderr-buffer connection))
+    connection))
+
+(defun cody--workspace-process-name (workspace)
+  "Create the process name for WORKSPACE.
+/Path/to/workspace/root is changed to cody-path-to-workspace-root.
+This name can be directly looked up more quickly on the workspace after it is set,
+since it is immutable, using `(process-name (cody-workspace-process workspace))'."
+  (let ((root (replace-regexp-in-string "^/+\\|/+$" ""
+                                        (cody-workspace-root workspace))))
+    (setq root (replace-regexp-in-string "/" "-" root))
+    (setq root (replace-regexp-in-string " " "-" root))
+    (downcase (concat "cody-" root))))
+
+(defun cody--initialize-connection (workspace)
+  "Send the protocol handshake requests for WORKSPACE."
+  ;; client -> 'initialize -> host
+  (condition-case err
+      (let ((response
+             (cody--request 'initialize
+                            (list
+                             :name "Emacs"
+                             :version "0.2"
+                             :workspaceRootUri (cody--workspace-uri)
+                             :capabilities (cody--client-capabilities)
+                             :extensionConfiguration (cody--extension-configuration)))))
+        (when response
+          (setf (cody-workspace-server-info workspace)
+                (cody-populate-server-info response))))
+    (error (cody--workspace-set-error err)))
+  (condition-case err
+      (run-hooks 'cody-connection-initialized-hook)
+    (error (cody--log "Error in `cody--initialize-connection': %s" err)))
+  ;; client -> 'initialized -> host
+  (condition-case err
+      (cody--notify 'initialized nil)
+    (error (cody--workspace-set-error err))))
 
 (defun cody--agent-process-environment ()
   "Return the environment variables to set in the Agent."
@@ -730,7 +828,7 @@ Returns a `cody-server-info' instance."
                  :userCanUpgrade (cjf (plist-get auth-status :userCanUpgrade)))
               (error
                (message "Error creating cody-auth-status instance: %s" err)
-               (cody--set-error "Failed to create cody-auth-status instance" err)
+               (cody--workspace-set-error "Failed to create cody-auth-status instance" err)
                (signal 'error err)))))
       (make-instance 'cody-server-info
                      :name (plist-get response :name)
@@ -739,28 +837,8 @@ Returns a `cody-server-info' instance."
                      :codyVersion (plist-get response :codyVersion)
                      :authStatus auth-status-instance))))
 
-(defun cody--initialize-connection ()
-  "Required handshake exchanging ClientInfo and ServerInfo."
-  (condition-case err
-      (let ((response
-             (cody--request 'initialize
-                            (list
-                             :name "Emacs"
-                             :version "0.2"
-                             :workspaceRootUri (cody--workspace-root)
-                             :capabilities (cody--client-capabilities)
-                             :extensionConfiguration (cody--extension-configuration)))))
-        (setq cody--server-info (cody-populate-server-info response)))
-    (error (cody--set-error err)))
-  (condition-case err
-      (run-hooks 'cody-connection-initialized-hook)
-    (error (cody--log "Error in `cody--initialize-connection': %s" err)))
-  (condition-case err
-      (cody--notify 'initialized nil)
-    (error (cody--log "Error calling 'initialize': %s" err))))
-
 (defun cody--client-capabilities ()
-  "Return the features that we support in the Emacs client."
+  "Return the Cody features that we support in the Emacs client."
   (list :edit "enabled"
         :editWorkspace "enabled"
         :codeLenses "enabled"
@@ -774,12 +852,14 @@ Returns a `cody-server-info' instance."
   (list :anonymousUserID (cody--internal-anonymized-uuid)
         :serverEndpoint (concat "https://" cody--sourcegraph-host "/")
         :accessToken (cody--access-token)
-        :debug cody--dev-enable-agent-debug-p
-        :debug-verbose cody--dev-enable-agent-debug-verbose-p
-        :codebase (cody--uri-for (cody--workspace-root))
+        :debug cody-enable-agent-debug
+        :debug-verbose cody-enable-agent-debug-verbose
+        :codebase (cody--workspace-uri)
         :customConfiguration (list (cons :cody.experimental.foldingRanges
                                          "indentation-based"))))
 
+;; This was used to switch workspaces before multi-workspace support.
+;; Keeping it because there are other situations where we will need it.
 (defun cody--notify-configuration-changed ()
   "Notify the agent that the extension configuration has changed."
   (let ((auth-status
@@ -791,47 +871,42 @@ Returns a `cody-server-info' instance."
       (message "Cody needs to re-authenticate")
       (cody-logout))))
 
-(defun cody--set-workspace-root (new-root)
-  "Instruct the Agent to switch to NEW-ROOT as its workspace.
-NEW-ROOT is an absolute path to a directory containing the workspace.
-This discards all mirrored documents from the previous workspace."
-  (setq cody-workspace-root new-root)
-  (cody--notify-configuration-changed))
-
-(defun cody--set-error (msg &optional err)
-  "Sets the plugin into an error state with MSG and ERR."
-  (cody--log "Error: %s %s" msg (if err (format "(%s)" err) ""))
-  (setq cody--status 'error)
-  (when err (put 'cody--status 'error err))
-  (force-mode-line-update t))
+(defun cody--format-jsonrpc-error (jsonrpc-error)
+  "Format JSONRPC-ERROR as a concise string."
+  (let ((request-id (nth 1 jsonrpc-error))
+        (error-message (alist-get 'jsonrpc-error-message (nth 2 jsonrpc-error))))
+    (format "request id=%s failed: %s" request-id error-message)))
 
 (defun cody--request (method params &rest args)
   "Wrapper for `jsonrpc-request' that makes it testable."
-  (unless cody--unit-testing-p
-    (apply #'jsonrpc-request (cody--connection) method params args)))
+  (unless (or cody--unit-testing-p (cody--error-p))
+    (condition-case err
+        (if-let ((connection (cody--connection)))
+            (apply #'jsonrpc-request (cody--connection) method params args)
+          (cody--log "Skipped sending %s: null connection" method))
+      (error (cody--log "Unable to send request %s: %s" method err)))))
 
 (defun cody--notify (method params &rest args)
   "Helper to send a Cody request for METHOD with PARAMS."
-  (unless cody--unit-testing-p
-    (apply #'jsonrpc-notify (cody--connection) method params args)))
-
-(defun cody--async-request (method params &rest args)
-  "Wrapper for `jsonrpc-async-request' that makes it testable."
-  (unless cody--unit-testing-p
-    (apply #'jsonrpc-async-request (cody--connection) method params args)))
+  (unless (or cody--unit-testing-p (cody--error-p))
+    (condition-case err
+        (if-let ((connection (cody--connection)))
+            (apply #'jsonrpc-notify connection method params args)
+          (cody--log "Skipped sending notification %s: null connection" method))
+      (error (cody--log "Unable to send %s: %s" method err)))))
 
 (defun cody--check-node-version ()
   "Signal an error if the default node.js version is too low.
-Min version is configurable with `cody--dev-node-min-version'."
+Min version is configurable with `cody-node-min-version'."
   (cond
-   (cody--dev-use-remote-agent
+   (cody-use-remote-agent
     t)
    ((eq cody--node-version-status 'good)
     t)
    ((eq cody--node-version-status 'bad)
-    (error "Installed nodejs must be at least %s." cody--dev-node-min-version))
+    (error "Installed nodejs must be at least %s." cody-node-min-version))
    (t
-    (let* ((cmd (concat (or cody--dev-node-executable "node") " -v"))
+    (let* ((cmd (concat (or cody-node-executable "node") " -v"))
            (node-version (string-trim (shell-command-to-string cmd)))
            minor major patch)
       (if (not (string-match "^v\\([0-9]+\\)\\.\\([0-9]+\\)\\.\\([0-9]+\\)"
@@ -843,45 +918,23 @@ Min version is configurable with `cody--dev-node-min-version'."
         (setq major (string-to-number (match-string 1 node-version))
               minor (string-to-number (match-string 2 node-version))
               patch (string-to-number (match-string 3 node-version)))
-        (let* ((min-version-parts (split-string cody--dev-node-min-version "\\."))
+        (let* ((min-version-parts (split-string cody-node-min-version "\\."))
                (min-major (string-to-number (nth 0 min-version-parts)))
                (min-minor (string-to-number (nth 1 min-version-parts)))
                (min-patch (string-to-number (nth 2 min-version-parts))))
-          (if (or (> major min-major)
-                  (and (= major min-major) (> minor min-minor))
-                  (and (= major min-major)
-                       (= minor min-minor)
-                       (>= patch min-patch)))
+          ;; For now, as of July 07 2024, make it exact, since 22.1.0 hangs Agent.
+          (if (and (= major min-major) (= minor min-minor) (= patch min-patch))
               (setq cody--node-version-status 'good)
             (setq cody--node-version-status 'bad)
             (error
-             "Error: Installed nodejs version %s is lower than min version %s"
-             node-version cody--dev-node-min-version))))))))
-
-(defun cody--workspace-root ()
-  "Return the workspace root for the Agent.
-You can override it with `cody-workspace-root'.
-Will always return a value that is non-nil, and tries hard to
-make it a reasonable root for the current project."
-  (or cody-workspace-root
-      (ignore-errors
-        (project-root (project-current)))
-      (let ((home-from-env (getenv "HOME")))
-        (if (and home-from-env (file-accessible-directory-p home-from-env))
-            home-from-env
-          ;; Inline locate-dominating-file to find a readable directory
-          (or (locate-dominating-file default-directory
-                                      (lambda (dir)
-                                        (file-accessible-directory-p dir)))
-              "/tmp")))))
+             "Error: Installed nodejs version %s is not the required version %s"
+             node-version cody-node-min-version))))))))
 
 (defun cody--get-custom-request-headers-as-map (custom-request-headers)
   "Convert CUSTOM-REQUEST-HEADERS string to a map."
   (let ((pairs (split-string custom-request-headers ",")))
     (cl-loop for (key value) on pairs by #'cddr
              collect (cons (string-trim key) (string-trim value)))))
-
-;;; Code for cody minor mode:
 
 (defun cody--logo-file (file-base)
   "Construct path to bundled cody image file.
@@ -932,8 +985,24 @@ it indicates that the icon works for both light and dark themes."
                    `(define-cached-icon ,name t))
                  fixed-icons))))
 
-;; Execute the macro to create the necessary functions
+;; Execute the macro to create the necessary functions; e.g.,
+;; `cody--logo-cody-logo-small'. They load their images lazily.
 (create-icon-functions)
+
+(defun cody--evaluate-mode-line-icon ()
+  "Decide the mode line icon based on the current buffer state."
+  (condition-case err
+      (when (and cody-mode (symbol-function 'cody--icon-cody-logo-small))
+        (let ((icon
+               (cl-case cody--buffer-state
+                 (active (cody--icon-cody-logo-small))
+                 (inactive (cody--icon-logo-monotone))
+                 (error (cody--icon-logo-disabled))
+                 (ignored (cody--icon-logo-disabled))
+                 (untrackable (cody--icon-logo-disabled))
+                 (otherwise nil))))
+          (cody--decorate-mode-line-lighter icon)))
+    (error (cody--log "Error in mode line evaluator: %s" err))))
 
 (defun cody--mode-line-click (_event)
   "Handle mouse click EVENT on Cody mode line item."
@@ -943,8 +1012,7 @@ it indicates that the icon works for both light and dark themes."
 (defun cody-propertize-icon (text-or-image)
   "Return propertized string or image for `cody--minor-mode-icon`.
 Argument TEXT-OR-IMAGE is the string or image to propertize."
-  (let ((buffer-state (buffer-local-value 'cody--buffer-state (current-buffer)))
-        (help-echo (if cody--buffer-state
+  (let ((help-echo (if cody--buffer-state
                        (format "Cody mode (%s) - click for menu" cody--buffer-state)
                      "Cody mode - click for menu")))
     (propertize (if (stringp text-or-image) text-or-image " ")
@@ -960,7 +1028,7 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
              ;; Hack - bump the image up a bit vertically using :ascent, to center it.
              (cody-propertize-icon (cons 'image (plist-put (cdr img) :ascent 80)))
            (cody-propertize-icon " Cody")))
-        (red-exclamation (if (eq cody--status 'error)
+        (red-exclamation (if (cody--error-p)
                              (propertize "!" 'face '(:foreground "red"))
                            "")))
     (concat icon red-exclamation)))
@@ -975,21 +1043,21 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
   ;;
   ;;:lighter cody--minor-mode-icon
   :keymap cody-mode-map
-  (if cody-mode
+  (if (bound-and-true-p cody-mode)
       (cody--mode-startup)
     (cody--mode-shutdown)))
 
 (defun cody--mode-startup ()
-  "Code to run when `cody-mode' is turned on in a buffer."
-  (unless (cody--alive-p)
-    (cody-login))
-  (when (cody--alive-p)
+  (if (not (cody--alive-p))
+    (message "Use `cody-login' to start Cody")
+    "Code to run when `cody-mode' is turned on in a buffer."
     (cl-loop for (hook . func) in cody--mode-hooks
              do (add-hook hook func nil 'local))
     (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
     (force-mode-line-update t)
-    (cody--handle-focus-changed (selected-window)))
-  (cody--buffer-init-state))
+    ;; Normally the hooks handle notifications, but we need to do this one.
+    (cody--buffer-update-state)
+    (cody--notify-doc-did-open)))
 
 (defun cody--mode-shutdown ()
   "Code to run when `cody-mode' is turned off in a buffer."
@@ -997,9 +1065,10 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func 'local))
   (cody--completion-cancel-timer)
-  (setq cody-mode nil)) ; clears the modeline and buffer-locals
+  (setq cody-mode nil ; clears the modeline and buffer-locals
+        cody--buffer-document-state nil))
 
-;;;###autoload
+;; ;;;###autoload
 (define-global-minor-mode cody--global-mode
   cody-mode cody--turn-on-if-applicable)
 
@@ -1018,7 +1087,9 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 
 (defun cody--mode-active-p ()
   "Return non-nil if `cody-mode' is enabled and `cody--buffer-state' is `active'."
-  (and cody-mode (eq cody--buffer-state 'active)))
+  (and cody-mode
+       (cody--alive-p)
+       (eq cody--buffer-state 'active)))
 
 (defun cody--before-change (beg end)
   "Handle deletions, which are only visible before the change.
@@ -1050,6 +1121,15 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
            (buffer-substring-no-properties beg end))))
     (error (cody--log "Error in `cody--after-change': %s" err))))
 
+(defun cody--after-revert ()
+  "Update Agent after buffer is reverted."
+  (condition-case err
+      (when (cody--mode-active-p)
+        (cody--buffer-update-state)
+        (cody--notify-doc-did-change
+         (point-min) (point-max) (buffer-substring-no-properties (point-min) (point-max))))
+    (error (cody--log "Error in `cody--after-revert': %s" err))))
+
 (defun cody--on-doc-change (beg end text)
   "Common code for `cody--before-change' and `cody--after-change'."
   (when (cody--mode-active-p)
@@ -1070,38 +1150,41 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
 
 (defun cody--handle-doc-closed ()
   "Notify agent that the document has been closed."
-  (when (and cody-mode
-             buffer-file-name
-             (eq cody--buffer-state 'active))
+  (when (and buffer-file-name
+             (cody--mode-active-p))
     (cody--notify 'textDocument/didClose
-                  (list :uri (cody--uri-for (buffer-file-name))))))
+                  (list :uri (cody--workspace-uri)))))
 
 (defun cody--handle-focus-changed (window)
   "Notify agent that a document has been focused or opened."
   ;; N.B. Don't check `cody--mode-active-p' here, as it causes tests to fail.
   ;; We can safely assume that we're only called when `cody-mode' is active.
-  (when (eq window (selected-window))
-    (cody--focus-or-open)
-    (if (cody--overlay-visible-p)
-        (cody--completion-hide)
-      (cody--completion-start-timer))))
+  (unless (cody--error-p)
+    (condition-case err
+        (when (eq window (selected-window))
+          (cody--focus-or-open)
+          (when (cody--overlay-visible-p)
+            (cody--completion-hide))
+          (cody--completion-start-timer))
+      (error (cody--log "cody--handle-focus-changed: %s" err)))))
 
 (defun cody--focus-or-open ()
   "Initialize the state, and decide whether to tell agent doc focused or opened.
 Current buffer is visiting the document under consideration."
-  (let* ((old-state cody--buffer-state)
-         (new-state (cody--buffer-init-state))
-         (already-open (eq old-state new-state)))
-    (when (eq new-state 'active)
-      (if already-open
-          (cody--notify-doc-did-focus)
-        (cody--notify-doc-did-open)))))
+  (cond
+   ((null cody--buffer-document-state) ; unopened
+    (cody--notify-doc-did-open))
+   ((eq cody--buffer-document-state 'opened)
+    (cody--notify-doc-did-focus))
+   ;; Otherwise it's closed. We drop any spurious events silently.
+   (t nil)))
 
 (defun cody--handle-selection-change ()
   "Handle changes in the selection or region.
 If point has moved off an overlay line, hide the completion and start a timer."
   (let ((current-selection (cody--selection-get-current)))
-    (unless (equal current-selection cody--last-selection)
+    (unless (or (equal current-selection cody--last-selection)
+                (cody--error-p))
       (setq cody--last-selection current-selection)
       (condition-case err
           (progn
@@ -1120,60 +1203,77 @@ If point has moved off an overlay line, hide the completion and start a timer."
                  (= point-line overlay-line)))
              cody--overlay-deltas)))
 
-(defun cody--buffer-init-state ()
-  "Initialize `cody--buffer-state' for the current buffer.
-Returns the new value."
-  (let ((alive (cody--alive-p))
-        (uri (cody--uri-for (current-buffer)))
-        (workspace-uri (cody--uri-for (cody--workspace-root))))
+(defun cody--buffer-update-state ()
+  "Initialize or update `cody--buffer-state' for the current buffer.
+Return the new value."
+  (let* ((workspace (cody--current-workspace))
+         (workspace-uri (and workspace (cody--workspace-uri workspace)))
+         (alive (and workspace (cody--alive-p
+                                (cody-workspace-connection workspace)))))
     (setq cody--buffer-state
           (cond
-           ((not alive) 'error)
-           ;; Until we get multiple workspaces supported, only make
-           ;; Cody "active" in files under the current workspace root.
-           ((and uri (string-prefix-p workspace-uri uri))
-            'active)
+           ;; We can't have an Agent+connection without a workspace.
+           ((not (cody-workspace-p workspace)) 'untrackable)
+           ((cody-workspace-error workspace) 'error)
+           (alive 'active)
            (t 'inactive)))))
 
 (defun cody--notify-doc-did-open ()
   "Inform the agent that the current buffer's document just opened."
-  (cody--notify 'textDocument/didOpen
-                (list
-                 :uri (cody--uri-for (buffer-file-name))
-                 :content (buffer-substring-no-properties (point-min) (point-max))
-                 :selection (cody--selection-get-current))))
+  (unless cody--buffer-document-state ; already opened
+    (cody--notify 'textDocument/didOpen
+                  (list
+                   :uri (cody--uri-for (buffer-file-name))
+                   :content (buffer-substring-no-properties (point-min)
+                                                            (point-max))
+                   :selection (cody--selection-get-current)))
+    (setq cody--buffer-document-state 'opened)))
+
+(defun cody--notify-doc-did-close ()
+  "Inform the agent that the current buffer's document just closed.
+This is sent when the last buffer visiting the file is killed."
+  (if (eq cody--buffer-document-state 'opened)
+      (progn
+        (cody--notify 'textDocument/didClose
+                      (list :uri (cody--uri-for (buffer-file-name))))
+        (setq cody--buffer-document-state 'closed))
+    (cody--log "textDocument/didClose skipped because document is in %s state"
+               cody--buffer-document-state)))
 
 (defun cody--notify-doc-did-focus ()
   "Inform the agent that the current buffer's document was just focusd."
-  (cody--notify 'textDocument/didFocus
-                (list ; Don't include :content, as it didn't change.
-                 :uri (cody--uri-for (buffer-file-name))
-                 :selection (cody--selection-get-current))))
+  (when (eq cody--buffer-document-state 'opened) ; else drop silently
+    (cody--notify 'textDocument/didFocus
+                  (list ; Don't include :content, as it didn't change.
+                   :uri (cody--uri-for (buffer-file-name))
+                   :selection (cody--selection-get-current)))))
 
 (defun cody--notify-doc-did-change (beg end text)
   "Inform the agent that the current buffer's document changed.
 This is a synchronous call that suspends the caller until it completes."
-  (let* ((uri (cody--uri-for (buffer-file-name)))
-         (selection (cody--selection-get-current))
-         (content-change (list
-                          :range (list :start (cody--position-from-offset beg)
-                                       :end (cody--position-from-offset end))
-                          :text text))
-         (params (list
-                  :uri uri
-                  :selection selection
-                  :contentChanges (vector content-change))))
-    (when cody--dev-panic-on-doc-desync
-      (setq params (plist-put params :testing
-                              (list :selectedText selection
-                                    :sourceOfTruthDocument
-                                    (list
-                                     :uri uri
-                                     :selection selection
-                                     :content (cody--buffer-string))))))
-    (let ((result (cody--request 'textDocument/change params)))
-      (unless (plist-get result :success)
-        (cody--log "Failed to apply textDocument/change request: %s" result)))))
+  (unless (or (cody--error-p)
+              (not (eq cody--buffer-document-state 'opened)))
+    (let* ((uri (cody--uri-for (buffer-file-name)))
+           (selection (cody--selection-get-current))
+           (content-change (list
+                            :range (list :start (cody--position-from-offset beg)
+                                         :end (cody--position-from-offset end))
+                            :text text))
+           (params (list
+                    :uri uri
+                    :selection selection
+                    :contentChanges (vector content-change))))
+      (when cody-panic-on-doc-desync
+        (setq params (plist-put params :testing
+                                (list :selectedText selection
+                                      :sourceOfTruthDocument
+                                      (list
+                                       :uri uri
+                                       :selection selection
+                                       :content (cody--buffer-string))))))
+      (let ((result (cody--request 'textDocument/change params)))
+        (unless (plist-get result :success)
+          (cody--log "Failed to apply textDocument/change request: %s" result))))))
 
 (defun cody--position-from-offset (offset)
   "Convert OFFSET to a protocol Position struct."
@@ -1243,7 +1343,7 @@ BEG and END are the region that changed, and LEN is its length."
                      (and (zerop len)
                           (string-prefix-p inserted-text suggested-text))
                      ;; User deleted only spaces and tabs on the current line.
-                     (and (plusp len) ; deletion (len is num chars deleted)
+                     (and (cl-plusp len) ; deletion (len is num chars deleted)
                           (string-match "^[ \t]*$"
                                         (get 'cody--vars 'deleted-text))))))
           (progn
@@ -1276,25 +1376,113 @@ the Cody overlay, as that is a case which I think does not occur."
 
 ;; See https://www.gnu.org/software/emacs/manual/html_node/elisp/JSONRPC-Overview.html
 ;; for a description of the parameters for this jsonrpc notification callback.
-(defun cody--handle-agent-notification (_ method params)
+(defun cody--notification-dispatcher (_ method params)
   "Handle notifications from the agent, e.g. shutdown.
 Optional argument METHOD is the agent protocol method with PARAMS."
   (cl-case method
     (chat/updateMessageInProgress
-     (cody--handle-chat-update params))
+     ;; placeholder for when we implement chat.
+     (cody--log "Chat is not implemented; should not be getting chat updates"))
     (shutdown ; Server initiated shutdown.
      (cody-logout))))
 
 (defun cody--kill-buffer-function ()
-  "If we are killing the last buffer visiting this file, notify agent."
+  "Check whether to notify agent and/or schedule workspace GC.
+If this is the last buffer visiting a file with an active workspace,
+notify the agent that the document has closed. If this is the last
+file open in the workspace, schedule a workspace garbage collection."
   (condition-case err
       (when (and (cody--mode-active-p)
                  buffer-file-name
                  (cody--last-buffer-for-file-p))
-        (cody--notify 'textDocument/didClose
-                      (list :uri (cody--uri-for (buffer-file-name)))))
+        ;; Last buffer visiting the file - we consider the document closed.
+        (cody--notify-doc-did-close)
+        ;; See if this is the last file in its workspace.
+        (when-let ((workspace-root (cody--workspace-root)))
+          ;; Check if no other buffers are visiting this workspace.
+          (unless (cl-some (lambda (buf)
+                             (with-current-buffer buf
+                               (and (cody--mode-active-p)
+                                    (equal workspace-root
+                                           (cody--workspace-root)))))
+                           (buffer-list))
+            (message "starting Cody workspace GC timer")
+            (run-at-time cody-gc-workspace-timeout-sec nil
+                         #'cody--garbage-collect-workspaces))))
     (error (cody--log "Error notifying agent closing %s: %s"
                       buffer-file-name err))))
+
+(defun cody--workspace-root (&optional buffer-or-file)
+  "Return the workspace root for the Agent.
+BUFFER-OR-FILE is a buffer visiting a file or a file being visited
+by a buffer, and if omitted defaults to the current buffer.
+Will return nil if the target buffer is not visiting a file, or
+the project root cannot be determined from the visited file path."
+  (when-let
+      ((result
+        (condition-case err
+            (let* ((default-directory ; used by `project-current'
+                    (cond
+                     ((bufferp buffer-or-file)
+                      (with-current-buffer buffer-or-file
+                        default-directory))
+                     ((and (stringp buffer-or-file)
+                           (get-file-buffer buffer-or-file))
+                      (with-current-buffer (get-file-buffer buffer-or-file)
+                        default-directory))
+                     (buffer-or-file
+                      (file-name-directory buffer-or-file))
+                     (t default-directory)))
+                   (project (project-current))
+                   (root (when project (project-root project))))
+              (and root (expand-file-name root)))
+          (error
+           (cody--log "Error determining project root: %s" err)
+           nil))))
+    (when result (expand-file-name result))))
+
+(defun cody--workspace-uri (&optional buffer-or-file)
+  "Return the canonical URI for the current or passed workspace.
+BUFFER-OR-FILE can be a buffer, buffer name, or file path.
+Defaults to the current workspace."
+  (if buffer-or-file
+      (cody--uri-for buffer-or-file)
+    (when-let ((workspace (cody--current-workspace)))
+      (cody-workspace-uri workspace))))
+
+(defun cody--workspace-buffers (&optional workspace)
+  "Return the buffers in WORKSPACE."
+  (cl-loop for buf being the buffers
+           when (with-current-buffer buf
+                  (and (cody--mode-active-p) ; or maybe just cody-mode?
+                       (equal workspace (cody--workspace-root))))
+           collect buf))
+
+(defun cody--error-p ()
+  "Return non-nil if there is a global error or workspace error."
+  (or cody--connection-global-error
+      (let ((workspace (cody--current-workspace)))
+        (and workspace (cody--workspace-get-error workspace)))))
+
+(defun cody--current-workspace (&optional buffer)
+  "Get or create the `cody-workspace' struct for the current project root.
+Does not initialize a connection. If BUFFER is passed, uses its workspace root.
+Return nil if there is no workspace root for the current buffer."
+  (when-let ((workspace-root (cody--workspace-root buffer))
+             (count (hash-table-count cody-workspaces)))
+    (or (gethash workspace-root cody-workspaces)
+        (when (< count cody-max-workspaces)
+          (puthash workspace-root (make-cody-workspace
+                                   :root workspace-root
+                                   :uri (cody--uri-for workspace-root))
+                   cody-workspaces)))))
+
+(defun cody--garbage-collect-workspaces ()
+  "Garbage collect workspaces that have no active buffers."
+  (maphash (lambda (root workspace)
+             (unless (cl-plusp (length (cody--workspace-buffers workspace)))
+               (cody-workspace-close workspace)))
+           cody-workspaces))
 
 (defun cody--last-buffer-for-file-p ()
   "Check if the current buffer is the last one visiting its file.
@@ -1307,208 +1495,237 @@ visiting its associated file."
                          (string-equal current-file (buffer-file-name buf))))
                   (buffer-list)))))
 
-(defun cody--handle-chat-update (params)
-  "Handler for `chat/updateMessageInProgress'.
-Argument PARAMS is the chat response object."
-  (if cody--typewriter-effect
-      (progn
-        (message nil)
-        (if params
-            (cody--chat-insert-msg-tail params)
-          (cody--chat-insert "\n")))
-    (if params
-        ;; Replace the accumulator with the updated generated output.
-        (setq cody--message-in-progress params)
-      ;; Null params --> Message is complete.
-      (message nil) ; clear 'Awaiting' message
-      (cody--chat-insert
-       (plist-get cody--message-in-progress :text) "\n\n")
-      (setq cody--message-in-progress nil))))
-
-(defun cody--chat-insert (&rest args)
-  "Insert ARGS at the end of the Cody chat buffer."
-  (ignore-errors ; don't throw errors in process filter
-    (with-current-buffer (cody--chat-buffer)
-      (goto-char (point-max))
-      (with-silent-modifications
-        (when args (apply #'insert args))
-        (set-buffer-modified-p nil)
-        (cody--chat-scroll-to-bottom)))))
-
-(defun cody--chat-scroll-to-bottom ()
-  "Move cursor to bottom of chat buffer."
-  ;; If the buffer is visible in a window, then the point doesn't move
-  ;; even after we insert text, as windows keep their own copy of point.
-  ;; We want it to act more like a shell.
-  (with-current-buffer (cody--chat-buffer)
-    (let ((win (get-buffer-window)))
-      (when (window-live-p win)
-        (set-window-point win (point-max))))))
-
-;; The agent sends an update with increasingly long hunks of the response,
-;; e.g. "Here", "Here is", "Here is an", "Here is an explanation", ...
-;; This permits a typewriter effect.
-(defun cody--chat-insert-msg-tail (params)
-  "Insert only the most recent update to the message output.
-This allows you to see the output stream in as it is generated.
-Cody chat buffer should be current, and PARAMS non-nil."
-  (let* ((old-text cody--message-in-progress)
-         (new-text (plist-get params :text))
-         (tail
-          (cond
-           ((null old-text) new-text)
-           ((>= (length new-text) (length old-text))
-            (substring new-text (length old-text)))
-           (t
-            ;; This could happen if the generator "backs up", which I've
-            ;; seen happen with ChatGPT, so we'll likely need to handle
-            ;; this at some point.
-            ""))))
-    (let ((inhibit-read-only t))
-      (insert tail))
-    (setq cody--message-in-progress new-text)))
-
-(defun cody-logout ()
-  "Stop the Cody agent process and turn Cody off globally."
+(defun cody-workspace-reopen ()
+  "Attempt to force-restart the connection for the current workspace."
   (interactive)
-  (when (cody--alive-p)
-    (ignore-errors
-      (cody--global-mode -1)) ; mode shutdown in all buffers
-    (ignore-errors
-      (cody--request 'shutdown nil)) ; Required by the protocol
-    (ignore-errors
-      (cody--kill-process))
-    (unless cody--integration-testing-p
-      (ignore-errors ; sometimes jsonrpc doesn't clean this one up
-        (kill-buffer (get-buffer "*cody events*"))))
-    (message "Cody has shut down."))
-  (setq cody--message-in-progress nil
-        cody--status 'disconnected
-        ;; Force re-check of node version on Cody startup.
-        cody--node-version-status nil
-        cody--server-info nil))
+  (when-let ((workspace (cody--current-workspace)))
+    (cody-workspace-close workspace))
+  (cody--workspace-open))
 
-(defun cody-force-unload ()
-  "Shut down Cody and remove all Cody-related buffers."
+(defun cody--workspace-open (&optional buffer-or-name)
+  "Point Cody at the specified BUFFER-OR-NAME's workspace.
+Defaults to current buffer if not specified.
+This is found via `cody--workspace-root', which looks for the repo root
+or equivalent. Return nil if BUFFER-OR-NAME is in a valid workspace."
+  (with-current-buffer (or buffer-or-name (current-buffer))
+    (when-let ((workspace-root (cody--workspace-root)))
+      (cody--connection))))
+
+(defun cody--workspace-close-all (&optional kill-buffers)
+  "Shut down all jsonrpc connections and clean up buffers.
+If kill-BUFFERS is non-nil, kills the event and stderr buffers."
+  (maphash (lambda (_key workspace)
+             (condition-case err
+                 (cody-workspace-close workspace kill-buffers)
+               (error (cody--log "Error closing workspace: %s %s" workspace err))))
+           cody-workspaces)
+  (clrhash cody-workspaces))
+
+(defun cody-workspace-close (workspace &optional kill-buffers)
+  "Shut down the WORKSPACE and reset its fields, but keep buffers.
+If kill-BUFFERS is non-nil, kills the event and stderr buffers."
   (interactive)
-  (cody-logout)
-  (ignore-errors
-    (kill-buffer (cody--chat-buffer)))
-  (ignore-errors
-    (kill-buffer cody-log-buffer-name)))
+  (let ((workspace-root (cody-workspace-root workspace)))
+    (cody--log "Closing workspace: %s" workspace-root)
+    (condition-case err
+        (with-timeout (5 (cody--log "Timeout sending 'shutdown to %s"
+                                    workspace-root))
+          (cody--request 'shutdown nil)))
+    (condition-case err
+        (when-let ((connection (cody-workspace-connection workspace)))
+          (with-timeout (10 (cody--log
+                             "Timeout shutting down jsonrpc connection"))
+            (jsonrpc-shutdown connection 'cleanup-buffers)))
+      (error
+       (cody--log "Error closing workspace: %s" err)))
+    (cody-workspace-reset workspace kill-buffers)
+    (remhash workspace-root cody-workspaces)))
 
-(defun cody--kill-process ()
-  "Shut down the jsonrpc connection."
-  (unless cody--unit-testing-p
-    (when cody--connection
-      (ignore-errors
-        (jsonrpc-shutdown cody--connection 'cleanup-buffers))
-      (setq cody--connection nil))))
+(defun cody-workspace-reset (workspace &optional kill-buffers)
+  "Reset all fields of WORKSPACE to their initial values, except buffers.
+If kill-BUFFERS is non-nil, kills the event and stderr buffers."
+  (setf (cody-workspace-root workspace) (getenv "HOME"))
+  (setf (cody-workspace-uri workspace) (cody--uri-for (getenv "HOME")))
+  (setf (cody-workspace-connection workspace) nil)
+  (setf (cody-workspace-server-info workspace) nil)
+  (setf (cody-workspace-status workspace) 'unconnected)
+  (setf (cody-workspace-error workspace) nil)
+  (when-let ((buf (cody-workspace-events-buffer workspace)))
+    (when kill-buffers
+      (kill-buffer buf))
+    (setf (cody-workspace-events-buffer workspace) nil))
+  (when-let ((buf (cody-workspace-stderr-buffer workspace)))
+    (when kill-buffers
+      (kill-buffer buf))
+    (setf (cody-workspace-stderr-buffer workspace) nil))
+  workspace)
 
-(defun cody ()
-  "Prompt for a recipe and arguments."
-  (interactive)
-  (let* ((recipes (cody--request 'recipes/list nil))
-         (recipe (completing-read "recipe: "
-                                  (seq-map (lambda (elt)
-                                             (plist-get elt :id))
-                                           recipes)
-                                  nil
-                                  t))
-         (chat (read-from-minibuffer (concat recipe ": "))))
-    (cody--request 'recipes/execute
-                   :id recipe
-                   :humanChatInput chat))
-  (message "Cody recipe sent."))
+(defun cody--workspace-set-error (msg &optional err workspace)
+  "Set the current workspace into an error state with MSG and ERR.
+Uses WORKSPACE instead of current workspace, if provided."
+  (let ((formatted-msg (if (and (listp msg)
+                                (eq (car msg) 'jsonrpc-error))
+                           (cody--format-jsonrpc-error msg)
+                         msg)))
+    (cody--log "Error: %s %s" formatted-msg (if err (format "(%s)" err) ""))
+    (when-let ((ws (or workspace (cody--current-workspace))))
+      (setf (cody-workspace-status ws) 'error)
+      (when err (setf (cody-workspace-error ws) formatted-msg))
+      (force-mode-line-update t))))
+
+(defun cody--workspace-get-error (&optional workspace)
+  "Get the error message for WORKSPACE, defaulting to the current workspace.
+Will return nil if there is no error."
+  (when-let ((ws (or workspace (cody--current-workspace))))
+    (or (cody-workspace-error ws)
+        (when (eq (cody-workspace-status ws) 'error)
+          "connection error"))))
+
+(defun cody--error-any-workspace-p ()
+  "Return non-nil if any workspace is in an error state."
+  (cl-loop for workspace being the hash-values of cody-workspaces
+           thereis (cody--workspace-get-error workspace)))
+
+(defun cody--any-workspace-active-p ()
+  "Return non-nil if any Cody workspace has an active connection."
+  (cl-some (lambda (workspace)
+             (let ((connection (cody-workspace-connection workspace)))
+               (and connection (cody--alive-p connection))))
+           (hash-table-values cody-workspaces)))
+
+(defun cody--enable-for-workspace-buffers (workspace-root)
+  "Turn on `cody-mode' in all open buffers that are part of WORKSPACE-ROOT
+   and qualify for Cody tracking."
+  (cl-loop for buf being the buffers
+           when (with-current-buffer buf
+                  (and (cody--should-auto-enable-cody-p buf)
+                       (equal workspace-root (cody--workspace-root))))
+           do (cody-mode 1)))
 
 ;;;###autoload
 (defun cody-login (&optional quiet)
   "Start the Cody agent. Optionally enables `cody-mode' in buffers.
-This function is idempotent and only starts a new connection if needed.
-Turning on `cody-mode' is set by the `cody-auto-enable-cody-mode'
-customization option. This function essentially starts up the Cody
-system, and you can call it from any Cody command wrapper to ensure
-there is a connection."
+This function starts up the Cody system, and you can call it from any
+Cody command wrapper to ensure there is a connection.
+This function is idempotent and only starts a new connection if needed."
   (interactive)
-  (if (cody--alive-p)
+  (if (cody--any-workspace-active-p)
       (unless quiet
         (message "Cody active and ready. M-x `cody-dashboard' for details."))
-    (setq cody--node-version-status nil) ; re-check node version on start
-    (message "Initializing Cody connection...")
-    (cody--connection)
-    (message "Cody connection initialized."))
-  (when (cody--alive-p)
-    (cody--global-mode 1)))
+    (cody--log "------------- Beginning Cody login sequence -------------")
+    (setq cody--node-version-status nil)
+    (cody--check-node-version)
+    (message "Starting Cody...")
+    (cody--connection 'start))
+  (if (not (cody--alive-p))
+      (progn
+        (message "Cody failed to connect. See *cody-log* for details.")
+        (cody--log "***** Cody login failed *****"))
+    (let ((workspace-root (cody--workspace-root)))
+      (cody--enable-for-workspace-buffers workspace-root)
+      (message "Cody is now tracking %s" workspace-root))))
+
+(defun cody-logout (&optional quiet)
+  "Stop the Cody agent process and turn Cody off globally."
+  (interactive)
+  (ignore-errors
+    ;; Don't kill the event buffers; let them truncate automatically.
+    ;; They often have useful debugging information.
+    (cody--workspace-close-all))
+  (when (bound-and-true-p cody--global-mode)
+    (cody--global-mode -1))
+  (cody--mode-turn-off-in-all-buffers) ; catch any stragglers
+  (unless quiet
+    (message "Cody has shut down."))
+  ;; Force re-check of node version on Cody startup.
+  (setq cody--node-version-status nil))
+
+(defun cody--mode-turn-off-in-all-buffers ()
+  "Sweep through all buffers and turn off `cody-mode' if it is on."
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (bound-and-true-p cody-mode)
+          (ignore-errors
+            (cody-mode -1)))))))
 
 (defun cody-restart ()
   "Shut down and restart Cody."
   (interactive)
   (let ((cody--node-version-status 'good))
     (ignore-errors (cody-logout)))
-  (setq cody--node-version-status nil)
   (cody-login))
 
+(defun cody-unload ()
+  "Try to remove all traces of Cody, including symbols, hooks, and buffers."
+  (interactive)
+  ;; Unload the feature, removing the symbol and definitions.
+  (when (featurep 'cody)
+    (unload-feature 'cody t))
+  (message "Cody has been unloaded and all traces have been removed."))
+
 (defun cody-unload-function ()
-  "Handle `unload-feature' for this package."
-  ;; TODO: Write integration test for this.
-  (cody-logout))
+  "Custom unload function for `cody` package.
+Perform custom cleanup and then allow the standard unload process to proceed."
+  ;; Close all workspaces and related buffers.
+  (ignore-errors
+    (cody--workspace-close-all 'kill-buffers))
+  ;; Turn off Cody mode in all buffers and globally.
+  (cody-logout t)
+  (cody--delete-buffer cody-log-buffer-name)
+
+  ;; Cancel any active timers that might still be running.
+  (dolist (var '(cody--completion-timer))
+    (when (boundp var)
+      (let ((timer (symbol-value var)))
+        (when (timerp timer)
+          (cancel-timer timer)))))
+
+  ;; Reset customizable variables to their default values.
+  (dolist (sym (apropos-internal "^cody-" #'boundp))
+    (when (custom-variable-p sym)
+      (custom-reevaluate-setting sym)))
+
+  ;; Remove mode line icon functions
+  (dolist (func (apropos-internal "^cody--" #'fboundp))
+    (fmakunbound func))
+
+  ;; Return nil to allow the standard unload process to proceed
+  nil)
+
+(defvar cody--inhibit-log-messages nil "Internal variable")
 
 (defun cody--log (msg &rest args)
   "Log MSG with ARGS, currently just for debugging."
-  (with-current-buffer (get-buffer-create cody-log-buffer-name)
-    (goto-char (point-max))
-    (let ((timestamp (format-time-string "[%Y-%m-%d %H:%M:%S] ")))
-      (insert timestamp (apply #'format msg args) "\n"))))
+  (unless cody--inhibit-log-messages  ; avoid infinite recursion
+    (let* ((cody--inhibit-log-messages t)
+           (workspace-root (let ((root (cody--workspace-root)))
+                             (if root (abbreviate-file-name root)
+                               "[no workspace]"))))
+      (with-current-buffer (get-buffer-create cody-log-buffer-name)
+        (goto-char (point-max))
+        (let ((timestamp (format-time-string "[%Y-%m-%d %H:%M:%S] ")))
+          (insert workspace-root)
+          (insert timestamp (apply #'format msg args) "\n"))))))
 
 (defun cody--clear-log ()
   "Clear the *cody-log* debugging message buffer."
   (interactive)
   (with-current-buffer (get-buffer-create cody-log-buffer-name)
-    (erase-buffer)))
-
-;;;###autoload
-(defun cody-chat ()
-  "Shorthand for the chat recipe.
-Query and output go into the *cody-chat* buffer."
-  (interactive)
-  (cody-login)
-  (display-buffer (cody--chat-buffer))
-  (let ((query (read-from-minibuffer "Ask Cody: ")))
-    (cody--chat-insert-query query)
-    (cody--request 'recipes/execute
-                   :id "chat-question"
-                   :humanChatInput query))
-  (message "Awaiting response from Cody..."))
-
-(defun cody--chat-insert-query (query)
-  "Insert the user QUERY into the chat output buffer."
-  (with-current-buffer (cody--chat-buffer)
-    (goto-char (point-max))
-    (cody--chat-insert "> " query "\n\n")
-    (goto-char (point-max))))
-
-(defun cody--chat-buffer ()
-  "Return Cody chat output buffer, initializing if necessary."
-  (let* ((probe (get-buffer cody--chat-buffer-name)))
-    (if (buffer-live-p probe)
-        probe
-      ;; Create and initialize the chat buffer.
-      (with-current-buffer (get-buffer-create cody--chat-buffer-name)
-        (buffer-disable-undo)
-        (let ((inhibit-modification-hooks t))
-          (insert-image (cody--icon-cody-logo) "Cody")
-          (insert "Welcome to Cody. Type `M-x cody-help` for more info.\n")
-          (set-buffer-modified-p nil))
-        (current-buffer)))))
+    (let ((inhibit-read-only t))
+      (with-silent-modifications
+        (erase-buffer)))))
 
 (defun cody--overlay-visible-p ()
   "Return non-nil if Cody is displaying a suggestion in the current buffer."
-  (when-let* ((active (cody--mode-active-p))
-              (o (car-safe cody--overlay-deltas))
-              (_ (overlayp o))
-              (_ (overlay-buffer o)) ; overlay is positioned/visible somewhere
-              (_ (cody--cc))) ; not a zombie
-    t))
+  (condition-case err
+      (when-let* ((active (cody--mode-active-p))
+                  (o (car-safe cody--overlay-deltas))
+                  (_ (overlayp o))
+                  (_ (overlay-buffer o)) ; overlay is positioned/visible somewhere
+                  (_ (cody--cc))) ; not a zombie
+        t)
+    (error (cody--log "Error in cody--overlay-visible-p: %s" err))))
 
 (defun cody--make-overlay (text pos)
   "Create a new overlay for displaying part of a completion suggestion.
@@ -1578,7 +1795,7 @@ the default binding."
   "Handler for `keyboard-quit'; clears the completion suggestion.
 Also calls the default key binding."
   (interactive)
-  (cody--call-if-at-overlay 'cody--completion-discard)
+  (cody--completion-discard)
   ;; Also call default binding.
   (let (cody-mode) ; avoid recursion
     (call-interactively (key-binding (this-command-keys)))))
@@ -1589,7 +1806,8 @@ Also calls the default key binding."
              (cody--mode-active-p)
              (not (cody--overlay-visible-p))
              (not (use-region-p))
-             (cody--completion-syntactically-eligible-p))
+             (cody--completion-syntactically-eligible-p)
+             (not (cody--error-p)))
     (cody-request-completion)))
 
 (defun cody--keyboard-event-p (event)
@@ -1613,34 +1831,39 @@ Also calls the default key binding."
   (interactive)
   (when (and (called-interactively-p 'any)
              (not (cody--mode-active-p)))
-    (error "Cody-mode not enabled in this buffer."))
-  (let* ((buf (current-buffer))
-         (line (1- (line-number-at-pos)))
-         (col (current-column))
-         (cursor (point))
-         (trigger-kind (if (called-interactively-p 'interactive)
-                           "Invoke" "Automatic")))
-    (when (and (not buffer-read-only)
-               (or (string= trigger-kind "Invoke")
-                   ;; Avoid spamming if the cursor hasn't moved.
-                   (not (eql cursor cody--completion-last-trigger-spot))))
-      (cody--completion-discard) ; Clears telemetry from previous request.
-      (cody--completion-update-timestamp :triggeredAt)
-      (setq cody--completion-last-trigger-spot cursor)
-      (jsonrpc-async-request
-       (cody--connection) 'autocomplete/execute
-       (list :uri (cody--uri-for (buffer-file-name))
-             :position (list :line line :character col)
-             :triggerKind trigger-kind)
-       ;; have new requests replace pending ones
-       :deferred 'cody
-       :success-fn (lambda (response)
-                     (cody--completion-handle-result
-                      response buf cursor trigger-kind))
-       :error-fn
-       (lambda (err) (cody--log "Error requesting completion: %s" err))
-       :timeout-fn
-       (lambda () (cody--log "Error: request-completion timed out"))))))
+    (error (if (cody--error-p)
+               "Cody is experiencing connection errors; try M-x cody-dashboard"
+             "Cody-mode not enabled in this buffer.")))
+  (unless (or (cody--error-p)
+              (not (eq cody--buffer-document-state 'opened)))
+    (let* ((buf (current-buffer))
+           (line (1- (line-number-at-pos)))
+           (col (current-column))
+           (cursor (point))
+           (trigger-kind (if (called-interactively-p 'interactive)
+                             "Invoke" "Automatic")))
+      (when (and (not buffer-read-only)
+                 (or (string= trigger-kind "Invoke")
+                     ;; Avoid spamming if the cursor hasn't moved.
+                     (not (eql cursor cody--completion-last-trigger-spot))))
+        (cody--completion-discard) ; Clears telemetry from previous request.
+        (cody--completion-update-timestamp :triggeredAt)
+        (setq cody--completion-last-trigger-spot cursor)
+        (jsonrpc-async-request
+         (cody--connection) 'autocomplete/execute
+         (list :uri (cody--uri-for (buffer-file-name))
+               :position (list :line line :character col)
+               :triggerKind trigger-kind)
+         ;; Have new requests replace pending ones.
+         :deferred 'cody
+         :success-fn (lambda (response)
+                       (cody--completion-handle-result
+                        response buf cursor trigger-kind))
+         :error-fn (lambda (err)
+                     (cody--log "Error requesting completion: %s" err))
+         :timeout-fn (lambda ()
+                       (cody--workspace-set-error
+                        "Error: request-completion timed out")))))))
 
 (defun cody--completion-handle-result (response buf request-spot kind)
   "Dispatches completion result based on jsonrpc RESPONSE.
@@ -1877,8 +2100,7 @@ Sends telemetry notifications when telemetry is enabled."
   (setq cody--completion nil
         cody--completion-timestamps nil
         ;; Just to be clear, don't change this or the completion will resurrect.
-        cody--completion-last-trigger-spot cody--completion-last-trigger-spot
-        cody--update-debounce-timer nil)
+        cody--completion-last-trigger-spot cody--completion-last-trigger-spot)
   (setplist 'cody--vars nil))
 
 (defun cody--check-cycle-preconditions ()
@@ -1958,168 +2180,50 @@ If point is not at the overlay, dispatches to the default binding."
       (cody--completion-cycle -1)
     (cody--execute-default-keybinding)))
 
-(defun cody--filtered-custom-variables (groups)
-  "Get all custom variables in the provided GROUPS
-Excludes those marked with `no-cody-dashboard`.
-Returns an alist where each element is (GROUP . VARIABLES)."
-  (cl-loop for group in groups
-           collect (cons group
-                         (cl-loop for symbol being the symbols
-                                  when (and (custom-variable-p symbol)
-                                            (not (get symbol 'no-cody-dashboard))
-                                            (string-prefix-p (symbol-name group)
-                                                             (symbol-name symbol)))
-                                  collect symbol into vars
-                                  finally return (sort vars #'string<)))))
-
-(defun cody-dashboard ()
-  "Show a console with data about Cody configuration and usage."
+;;;###autoload
+(defun cody-help ()
+  "Display help information about Cody in a dedicated buffer."
   (interactive)
-  (let ((buf (get-buffer-create "*cody-dashboard*"))
-        (image-marker (make-marker))
-        (grouped-vars (cody--filtered-custom-variables cody--defgroups)))
-    (with-current-buffer buf
-      (cl-labels ((itext (text &optional face)
-                    (insert (propertize (concat text "\n") 'face face)))
-                  (isec (header)
-                    (insert (propertize header 'face '(:underline t)))
-                    (insert "\n"))
-                  (ifield (label value &optional face)
-                    (insert (propertize (concat label ": ")
-                                        'face 'font-lock-builtin-face))
-                    (insert (propertize (concat value "\n") 'face face)))
-                  (fbuf (buffer)
-                    (setq buffer-read-only t)
-                    (pop-to-buffer buffer)
-                    (goto-char (point-max))))
-        (let ((inhibit-read-only t)
-              (inhibit-modification-hooks t))
-          (erase-buffer)
-          (setq buffer-read-only nil)
+  (let ((help-buffer (get-buffer-create "*Cody Help*"))
+        (help-text
+         "Cody is an AI-powered coding assistant.
 
-          (unless (cody--alive-p)
-            (itext "Cody is not connected" 'warning)
-            (fbuf buf)
-            (cl-return-from cody-dashboard))
+Here are some key features and commands to get you started:
 
-          (itext "Cody is connected" 'success)
-          (insert "\n\n")
+* Autocompletion: Cody suggests code as you type (M-\\ or TAB)
+* Manual Completion Request: `M-x cody-request-completion`
+* Toggle Cody Mode: `M-x cody-mode`
+* View Configuration, Troubleshooting: `M-x cody-dashboard`
 
-          (isec "Server Info")
+For more detailed documentation and customization options, please visit:
+"))
+    (with-current-buffer help-buffer
+      (setq buffer-read-only nil)
+      (erase-buffer)
+      (insert (ansi-color-apply "Welcome to Cody for Emacs!"))
+      (when (display-graphic-p)
+        (insert "\n\n")
+        (insert-image (cody--icon-cody-logo))
+        (insert "\n\n"))
+      (insert help-text)
+      (help-insert-xref-button "https://github.com/sourcegraph/emacs-cody"
+                               'help-url "https://github.com/sourcegraph/emacs-cody")
+      (insert "\n\n")
+      (goto-char (point-min))
+      (help-mode)
+      (set-buffer-modified-p nil)
+      (setq buffer-read-only t)
+      (display-buffer help-buffer))))
 
-          ;; Server Info fields
-          (ifield "  Name" (cody--server-info-name cody--server-info)
-                  'font-lock-type-face)
-          (ifield "  Authenticated"
-                  (if (cody--server-info-authenticated cody--server-info)
-                      "Yes" "No")
-                  (if (cody--server-info-authenticated cody--server-info)
-                      'success 'error))
-          (ifield "  Cody Enabled"
-                  (if (cody--server-info-cody-enabled cody--server-info)
-                      "Yes" "No")
-                  (if (cody--server-info-cody-enabled cody--server-info)
-                      'success 'error))
-          (ifield "  Cody Version" (cody--server-info-cody-version
-                                    cody--server-info))
+(defun cody--delete-buffer (buffer-or-name)
+  "Delete the buffer given BUFFER-OR-NAME, which can be a string or a buffer."
+  (ignore-errors
+    (when buffer-or-name
+      (let ((buffer (get-buffer buffer-or-name)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
-          (insert "\n")
-          (isec "Auth Status")
-
-          ;; Auth Status fields
-          (when-let ((auth-status (cody--server-info-auth-status
-                                   cody--server-info)))
-            ;; Insert avatar marker
-            (set-marker image-marker (point))
-            (insert "\n")
-            (ifield "  Username" (cody--auth-status-username auth-status))
-            (ifield "  Is Logged In"
-                    (if (cody--auth-status-is-logged-in auth-status)
-                        "Yes" "No")
-                    (if (cody--auth-status-is-logged-in auth-status)
-                        'success 'error))
-            (ifield "  Site Has Cody Enabled"
-                    (if (cody--auth-status-site-has-cody-enabled auth-status)
-                        "Yes" "No")
-                    (if (cody--auth-status-site-has-cody-enabled auth-status)
-                        'success 'error))
-            (ifield "  Site Version" (cody--auth-status-site-version
-                                      auth-status))
-            (ifield "  Display Name" (cody--auth-status-display-name
-                                      auth-status))
-            (let ((email (cody--auth-status-primary-email auth-status)))
-              (ifield "  Primary Email" email 'font-lock-string-face))
-            (insert "\n"))
-
-          ;; Cody Settings fields
-          (insert "\n")
-          (isec "Cody Settings")
-          (insert "\n")
-          (dolist (group-vars grouped-vars)
-            (let ((group (car group-vars))
-                  (variables (cdr group-vars)))
-              (isec (format "%s" group))
-              (dolist (var variables)
-                (ifield (format "  %s" var) (format "%s" (symbol-value var))
-                        'font-lock-variable-name-face))))
-          (fbuf buf))
-        (goto-char (point-min))
-        (forward-line 1))
-      (cody--dashboard-insert-avatar image-marker))))
-
-(defun cody--dashboard-insert-avatar (image-marker)
-  "Insert avatar image at the position marked by IMAGE-MARKER."
-  (let* ((auth-status (cody--server-info-auth-status cody--server-info))
-         (avatar-url (when auth-status
-                       (cody--auth-status-avatar-url auth-status))))
-    (when avatar-url
-      (url-retrieve
-       avatar-url
-       (lambda (_status)
-         (goto-char (point-min))
-         (re-search-forward "\n\n")
-         (let ((image-data (buffer-substring-no-properties
-                            (point) (point-max))))
-           (when (image-type-available-p 'png)
-             (with-current-buffer (marker-buffer image-marker)
-               (save-excursion
-                 (goto-char image-marker)
-                 (let ((inhibit-read-only t))
-                   (insert "  ")
-                   ;; Insert image at marker with size limit
-                   (insert-image (create-image image-data 'png t
-                                               :ascent 'center
-                                               :max-height 40
-                                               :max-width 40))
-                   (insert "\n")))))))))))
-
-(defun cody-doctor ()
-  "Diagnose and troubleshoot Cody issues."
-  (interactive)
-  ;; Obviously lots more to do here.
-  (if (cody--alive-p)
-      (message "Cody is running! Try `M-x cody-chat' to get started.")
-    (message "Cody is not running. 'M-x cody-login' to start hacking.")))
-
-(defun cody-switch-workspace ()
-  "Switch Cody's workspace root directory.
-Prompts for a new directory, defaulting to the repo root of the current file
-(if found), or the current file's directory, or default-directory. Notifies
-the agent about the configuration change."
-  (interactive)
-  (let* ((current-file (buffer-file-name (current-buffer)))
-         (repo-root (or (and current-file
-                             (cody--get-repo-root-path
-                              (project-current) current-file))
-                        (and current-file
-                             (file-name-directory current-file))
-                        (cody--workspace-root)))
-         (new-root (read-directory-name "Select new workspace root: " repo-root)))
-    (when (and new-root (file-directory-p new-root))
-      (cody--set-workspace-root new-root)
-      (message "Workspace root changed to: %s" new-root))))
-
-;;; Telemetry
+;; TODO: Switch to telemetry v2.
 
 (defun cody--completion-update-timestamp (property)
   "Set the given timestamp named PROPERTY to the current time."
@@ -2158,7 +2262,7 @@ the agent about the configuration change."
     (list
      :event event-name
      :userCookieID uuid
-     :url (cody--workspace-root)
+     :url (cody--workspace-uri)
      :source "IDEEXTENSION"
      :argument nil
      :publicArgument params
