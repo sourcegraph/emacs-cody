@@ -157,6 +157,13 @@ Sends this flag as part of the agent extension configuration."
   :group 'cody-dev
   :type 'boolean)
 
+(defcustom cody-enable-event-tracing nil
+  "Non-nil to enable every agent to have an events buffer.
+The events buffer can be reached via `cody-dashboard' and has a
+trace of all events that are sent over the jsonrpc channel."
+  :group 'cody-dev
+  :type 'boolean)
+
 (defcustom cody-panic-on-doc-desync nil
   "Non-nil to ask the Agent to panic if we discover it is desynced.
 De-syncing is when the Agent's copy of a document is out of sync with
@@ -736,8 +743,9 @@ Return value is a `jsonrpc-process-connection'."
                       :request-dispatcher #'cody--request-dispatcher
                       :process process)))
     (setf (cody-workspace-status workspace) 'connected)
-    (setf (jsonrpc--events-buffer connection) events-buffer)
-    (setf (cody-workspace-events-buffer workspace) events-buffer)
+    (when cody-enable-event-tracing
+      (setf (jsonrpc--events-buffer connection) events-buffer)
+      (setf (cody-workspace-events-buffer workspace) events-buffer))
     (setf (cody-workspace-stderr-buffer workspace)
           (jsonrpc-stderr-buffer connection))
     connection))
@@ -1324,7 +1332,7 @@ Installed on `post-command-hook'."
         ;; Have a new request replace any pending request.
         (when cody--post-command-debounce-timer
           (cancel-timer cody--post-command-debounce-timer))
-        (run-with-idle-timer 0 nil #'cody--handle-selection-change))
+        (run-with-idle-timer 0.1 nil #'cody--handle-selection-change))
     (error (cody--log "Error in `cody--post-command': %s: %s"
                       buffer-file-name err))))
 
