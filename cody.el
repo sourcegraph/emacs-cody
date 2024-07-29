@@ -856,7 +856,11 @@ Returns a `cody-server-info' instance."
         :showDocument "enabled"
         :ignore "none"
         :untitledDocuments "enabled"
-        :progressBars "none"))
+        :progressBars "none"
+        :webviewMessages "string-encoded"
+        :webview '(:type "native"
+                         :cspSource "'self' http://loalhost:1237"
+                         :webviewBundleServingPrefix "http://localhost:1237/")))
 
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
@@ -2382,6 +2386,22 @@ CONN is the connection to the agent."
      (cody--handle-webview-post-message (car params)))
     (`webview/postMessageStringEncoded
      (cody--handle-webview-post-message-string-encoded (car params)))
+    (`webview/createWebviewPanel
+     (let ((handle (plist-get (car params) :handle)))
+       (message "webview/createWebviewPanel with handle %s" handle)))
+    (`webview/dispose
+     (message "TODO: webview/dispose"))
+    (`webview/reveal
+     (message "TODO: webview/reveal"))
+    (`webview/setTitle
+     (message "TODO: webview/setTitle"))
+    (`webview/setIconPath
+     (message "TODO: webview/setIconPath"))
+    (`webview/setOptions
+     (message "TODO: webview/setOptions"))
+    (`webview/setHtml
+     (message "TODO: webview/setHtml"))
+    (`webview/registerWebviewViewProvider nil)
     (`progress/start
      (cody--handle-progress-start (car params)))
     (`progress/report
