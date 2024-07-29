@@ -1,7 +1,7 @@
 ;;; cody-tests.el --- Cody tests with Agent -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; These tests involve spinning up a Cody agent and talking to it.
+;; Integration tests that use the Cody Agent.
 
 ;;; Code:
 

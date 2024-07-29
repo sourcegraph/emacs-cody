@@ -475,7 +475,8 @@ This log is shared across all agent connections.")
     (post-command-hook . cody--post-command)
     (kill-buffer-hook . cody--kill-buffer-function)
     (activate-mark-hook . cody--handle-selection-change)
-    (deactivate-mark-hook . cody--handle-selection-change))
+    (deactivate-mark-hook . cody--handle-selection-change)
+    (after-revert-hook . cody--after-revert))
   "List of buffer-local hooks that Cody registers on in `cody-mode`.
 These hooks enable it to keep buffers and selections synced
 with the Cody Agent.")
@@ -923,7 +924,7 @@ Min version is configurable with `cody-node-min-version'."
                (min-minor (string-to-number (nth 1 min-version-parts)))
                (min-patch (string-to-number (nth 2 min-version-parts))))
           ;; For now, as of July 07 2024, make it exact, since 22.1.0 hangs Agent.
-          (if (and (= major min-major) (= minor min-minor) (= patch min-patch) )
+          (if (and (= major min-major) (= minor min-minor) (= patch min-patch))
               (setq cody--node-version-status 'good)
             (setq cody--node-version-status 'bad)
             (error
@@ -1048,14 +1049,16 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
     (cody--mode-shutdown)))
 
 (defun cody--mode-startup ()
-  "Code to run when `cody-mode' is turned on in a buffer."
-  (cl-loop for (hook . func) in cody--mode-hooks
-           do (add-hook hook func nil 'local))
-  (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
-  (force-mode-line-update t)
-  ;; Normally the hooks handle notifications, but we need to do this one.
-  (cody--buffer-update-state)
-  (cody--notify-doc-did-open))
+  (if (not (cody--alive-p))
+    (message "Use `cody-login' to start Cody")
+    "Code to run when `cody-mode' is turned on in a buffer."
+    (cl-loop for (hook . func) in cody--mode-hooks
+             do (add-hook hook func nil 'local))
+    (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
+    (force-mode-line-update t)
+    ;; Normally the hooks handle notifications, but we need to do this one.
+    (cody--buffer-update-state)
+    (cody--notify-doc-did-open)))
 
 (defun cody--mode-shutdown ()
   "Code to run when `cody-mode' is turned off in a buffer."
@@ -1063,7 +1066,8 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
   (cl-loop for (hook . func) in cody--mode-hooks
            do (remove-hook hook func 'local))
   (cody--completion-cancel-timer)
-  (setq cody-mode nil)) ; clears the modeline and buffer-locals
+  (setq cody-mode nil ; clears the modeline and buffer-locals
+        cody--buffer-document-state nil))
 
 ;; ;;;###autoload
 (define-global-minor-mode cody--global-mode
@@ -1084,7 +1088,9 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
 
 (defun cody--mode-active-p ()
   "Return non-nil if `cody-mode' is enabled and `cody--buffer-state' is `active'."
-  (and cody-mode (eq cody--buffer-state 'active)))
+  (and cody-mode
+       (cody--alive-p)
+       (eq cody--buffer-state 'active)))
 
 (defun cody--before-change (beg end)
   "Handle deletions, which are only visible before the change.
@@ -1115,6 +1121,15 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
          (without-restriction
            (buffer-substring-no-properties beg end))))
     (error (cody--log "Error in `cody--after-change': %s" err))))
+
+(defun cody--after-revert ()
+  "Update Agent after buffer is reverted."
+  (condition-case err
+      (when (cody--mode-active-p)
+        (cody--buffer-update-state)
+        (cody--notify-doc-did-change
+         (point-min) (point-max) (buffer-substring-no-properties (point-min) (point-max))))
+    (error (cody--log "Error in `cody--after-revert': %s" err))))
 
 (defun cody--on-doc-change (beg end text)
   "Common code for `cody--before-change' and `cody--after-change'."
@@ -1206,9 +1221,7 @@ Return the new value."
 
 (defun cody--notify-doc-did-open ()
   "Inform the agent that the current buffer's document just opened."
-  (if cody--buffer-document-state
-      (cody--log "textDocument/didOpen skipped because document is in %s state"
-                 cody--buffer-document-state)
+  (unless cody--buffer-document-state ; already opened
     (cody--notify 'textDocument/didOpen
                   (list
                    :uri (cody--uri-for (buffer-file-name))
@@ -1606,7 +1619,9 @@ This function is idempotent and only starts a new connection if needed."
     (message "Starting Cody...")
     (cody--connection 'start))
   (if (not (cody--alive-p))
-      (message "Cody failed to connect. See *cody-log* for details.")
+      (progn
+        (message "Cody failed to connect. See *cody-log* for details.")
+        (cody-log "***** Cody login failed *****"))
     (let ((workspace-root (cody--workspace-root)))
       (cody--enable-for-workspace-buffers workspace-root)
       (message "Cody is now tracking %s" workspace-root))))
@@ -1661,7 +1676,7 @@ Perform custom cleanup and then allow the standard unload process to proceed."
   (cody--delete-buffer cody-log-buffer-name)
 
   ;; Cancel any active timers that might still be running.
-  (dolist (var '(cody--completion-timer cody--update-debounce-timer))
+  (dolist (var '(cody--completion-timer))
     (when (boundp var)
       (let ((timer (symbol-value var)))
         (when (timerp timer)
@@ -2086,8 +2101,7 @@ Sends telemetry notifications when telemetry is enabled."
   (setq cody--completion nil
         cody--completion-timestamps nil
         ;; Just to be clear, don't change this or the completion will resurrect.
-        cody--completion-last-trigger-spot cody--completion-last-trigger-spot
-        cody--update-debounce-timer nil)
+        cody--completion-last-trigger-spot cody--completion-last-trigger-spot)
   (setplist 'cody--vars nil))
 
 (defun cody--check-cycle-preconditions ()

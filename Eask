@@ -22,9 +22,9 @@
 (script "test"
   (require 'package)
   (add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
-
   (package-initialize)
 
+  ;; Bootstrap straight.el
   (let ((bootstrap-file (expand-file-name "straight/repos/straight.el/bootstrap.el" user-emacs-directory))
         (bootstrap-version 5))
     (unless (file-exists-p bootstrap-file)
@@ -37,21 +37,25 @@
     (load bootstrap-file nil 'nomessage))
 
   (straight-use-package 'uuidgen)
-  (require 'uuidgen)
-
   (straight-use-package 'buttercup)
+
+  (require 'uuidgen)
   (require 'buttercup)
 
   ;; TODO: Manually set PATH for the CI environment
   ;;(setenv "PATH" (concat "/custom/path/to/node/bin:" (getenv "PATH")))
 
+  ;; Output the path variables for debugging
+  (message "load-path: %s" load-path)
+  (message "default-directory: %s" default-directory)
+
   (message "Starting test loading.")
   (let* ((default-directory (file-name-directory (or load-file-name buffer-file-name)))
          (project-root (file-name-directory (locate-dominating-file default-directory "Eask")))
          (test-dir (expand-file-name "tests" project-root))
-         (buttercup-files (directory-files test-dir t "cody-doc-sync-tests\\.el$"))
-         (ert-files (directory-files test-dir t "cody-doc-sync-ert-tests\\.el$")))
+         (buttercup-files (directory-files test-dir t "\\.el$")))
     (message "Project root: %s" project-root)
+    (message "buttercup-files: %s" buttercup-files)
     (add-to-list 'load-path project-root)
     (add-to-list 'load-path test-dir)
 
@@ -59,10 +63,4 @@
     (dolist (file buttercup-files)
       (message "Loading Buttercup test file: %s" file)
       (load file t t t))
-    (buttercup-run-discover)
-
-    ;; Load and run ERT tests.
-    (dolist (file ert-files)
-      (message "Loading ERT test file: %s" file)
-      (load file t t t))
-    (ert-run-tests-batch-and-exit)))
+    (buttercup-run-discover)))

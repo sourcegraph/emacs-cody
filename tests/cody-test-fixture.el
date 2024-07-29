@@ -1,12 +1,17 @@
 ;;; cody-test-fixture.el --- Utility functions for Cody tests -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2024 Sourcegraph, Inc.
+
+;; Version: 0.1
+;; Author: Steve Yegge <steve.yegge@gmail.com>
+;; URL: https://github.com/sourcegraph/emacs-cody
+
 ;;; Commentary:
-;; Utilities for Cody's integration tests.
+;; Framework and utilities for Cody's integration tests.
 
 ;;; Code:
 
 (require 'cody)
-
 
 (defmacro cody--test-doc-sync (&rest args)
   "Macro to define a Cody document synchronization test for Buttercup.
@@ -120,8 +125,6 @@ with the initial contents, to transform it into the expected contents.
 
 ;; This is to get `cody--mode-startup' and other cody functions to behave correctly.
 ;; It ensures `selected-window' returns something useful, as we use it in several places.
-;; TODO: Check whether this approach is responsible for the dreaded error,
-;;    buttercup--run-spec: Device 1 is not a termcap terminal device
 (defun cody--test-with-temp-window (fn)
   "Execute FN in a temporary window environment."
   (let* ((buffer (get-buffer-create "*cody-temp-test-buffer*"))
