@@ -128,7 +128,9 @@ If nil, Cody will search for node using variable `exec-path'."
 (defcustom cody-max-workspaces 1
   "Maximum number of active workspace connections Cody will create.
 Each workspace connection spins up its own Cody agent subprocess.
-You can view all Cody workspaces with `cody-dashboard'.")
+You can view all Cody workspaces with `cody-dashboard'."
+  :type 'number
+  :group 'cody-dev)
 
 (defcustom cody-use-remote-agent nil
   "Non-nil to connect to an agent running on `cody--dev-remote-agent-port`.
@@ -398,9 +400,6 @@ Argument CC is the completion object."
                                              (buffer-file-name)))
                     "dist" "index.js")
   "Path to bundled cody agent.")
-
-(defconst cody-node-min-version "20.4.0"
-  "The minimum required version of node.js for Cody.")
 
 ;; It might seem odd to have a separate Node process for each workspace,
 ;; but it makes things more flexible in general; e.g. integration testing
@@ -1621,7 +1620,7 @@ This function is idempotent and only starts a new connection if needed."
   (if (not (cody--alive-p))
       (progn
         (message "Cody failed to connect. See *cody-log* for details.")
-        (cody-log "***** Cody login failed *****"))
+        (cody--log "***** Cody login failed *****"))
     (let ((workspace-root (cody--workspace-root)))
       (cody--enable-for-workspace-buffers workspace-root)
       (message "Cody is now tracking %s" workspace-root))))
