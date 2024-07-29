@@ -32,6 +32,13 @@ Once you have it working, working, then any time you make changes to (or
 update) the agent in the sibling `cody` directory, you can re-run `node ./scripts/build.js`
 to rebuild and re-copy the distribution files into `./dist/`
 
+*** Stderr Output
+
+To collect the command line and stderr output, change
+`cody--agent-command` to wrap the command line in
+`scripts/tee-stderr.sh`. The command line and stderr will be appended
+to `/tmp/error_log.txt`.
+
 *** Tree-sitter grammars
 
 Cody uses [[tree-sitter][https://tree-sitter.github.io/tree-sitter/]] for improving
