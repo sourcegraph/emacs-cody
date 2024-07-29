@@ -561,6 +561,8 @@ can only be sent while the document state is `opened'.")
     '(:eval (cody--evaluate-mode-line-icon))
   "Descriptor for producing a custom menu in the mode line lighter.")
 
+(defvar cody--post-command-debounce-timer nil)
+
 ;; Utilities
 
 (defmacro cody--call-safely (func &rest args)
@@ -731,6 +733,7 @@ Return value is a `jsonrpc-process-connection'."
                       'jsonrpc-process-connection
                       :name process-name
                       :notification-dispatcher #'cody--notification-dispatcher
+                      :request-dispatcher #'cody--request-dispatcher
                       :process process)))
     (setf (cody-workspace-status workspace) 'connected)
     (setf (jsonrpc--events-buffer connection) events-buffer)
@@ -881,9 +884,8 @@ Returns a `cody-server-info' instance."
   "Wrapper for `jsonrpc-request' that makes it testable."
   (unless (or cody--unit-testing-p (cody--error-p))
     (condition-case err
-        (if-let ((connection (cody--connection)))
-            (apply #'jsonrpc-request (cody--connection) method params args)
-          (cody--log "Skipped sending %s: null connection" method))
+        (when-let ((connection (cody--connection)))
+          (apply #'jsonrpc-request (cody--connection) method params args))
       (error (cody--log "Unable to send request %s: %s" method err)))))
 
 (defun cody--notify (method params &rest args)
@@ -1048,9 +1050,10 @@ Argument TEXT-OR-IMAGE is the string or image to propertize."
     (cody--mode-shutdown)))
 
 (defun cody--mode-startup ()
+  "Code to run when `cody-mode' is turned on in a buffer."
   (if (not (cody--alive-p))
-    (message "Use `cody-login' to start Cody")
-    "Code to run when `cody-mode' is turned on in a buffer."
+      (when (called-interactively-p 'interactive)
+        (message "Use `cody-login' to start Cody"))
     (cl-loop for (hook . func) in cody--mode-hooks
              do (add-hook hook func nil 'local))
     (add-to-list 'mode-line-modes cody--mode-line-icon-evaluator)
@@ -1132,7 +1135,9 @@ OLD-LENGTH is the length of the pre-change text replaced by that range."
 
 (defun cody--on-doc-change (beg end text)
   "Common code for `cody--before-change' and `cody--after-change'."
-  (when (cody--mode-active-p)
+  (when (and (cody--mode-active-p)
+             ;; Don't request a completion after an undo operation.
+             (not (memq last-command '(undo undo-only advertised-undo))))
     (cody--notify-doc-did-change beg end text)
     (cody--recompute-or-hide-overlay)))
 
@@ -1315,7 +1320,11 @@ value is appropriate for sending directly to the rpc layer."
   "If point or mark has moved, update selection/focus with agent.
 Installed on `post-command-hook'."
   (condition-case err
-      (cody--handle-selection-change)
+      (progn
+        ;; Have a new request replace any pending request.
+        (when cody--post-command-debounce-timer
+          (cancel-timer cody--post-command-debounce-timer))
+        (run-with-idle-timer 0 nil #'cody--handle-selection-change))
     (error (cody--log "Error in `cody--post-command': %s: %s"
                       buffer-file-name err))))
 
@@ -1373,18 +1382,6 @@ the Cody overlay, as that is a case which I think does not occur."
                 (and (overlay-get ovl 'after-string) ; not e.g. logo ovl
                      (= pos (overlay-start ovl))))
               cody--overlay-deltas))
-
-;; See https://www.gnu.org/software/emacs/manual/html_node/elisp/JSONRPC-Overview.html
-;; for a description of the parameters for this jsonrpc notification callback.
-(defun cody--notification-dispatcher (_ method params)
-  "Handle notifications from the agent, e.g. shutdown.
-Optional argument METHOD is the agent protocol method with PARAMS."
-  (cl-case method
-    (chat/updateMessageInProgress
-     ;; placeholder for when we implement chat.
-     (cody--log "Chat is not implemented; should not be getting chat updates"))
-    (shutdown ; Server initiated shutdown.
-     (cody-logout))))
 
 (defun cody--kill-buffer-function ()
   "Check whether to notify agent and/or schedule workspace GC.
@@ -2349,6 +2346,191 @@ to see the current completion response object in detail.
                                (eieio-oref obj (eieio-slot-descriptor-name slot))))
                        (eieio-class-slots (eieio-object-class obj))))))
     (pop-to-buffer buf)))
+
+;; Server (agent) requests and notifications.
+
+(defun cody--notification-dispatcher (conn method &rest params)
+  "Dispatch JSON-RPC notifications from the server based on METHOD and PARAMS.
+CONN is the connection to the agent."
+  (pcase method
+    (`debug/message
+     (cody--handle-debug-message (car params)))
+    (`editTask/didUpdate
+     (cody--handle-edit-task-did-update (car params)))
+    (`editTask/didDelete
+     (cody--handle-edit-task-did-delete (car params)))
+    (`codeLenses/display
+     (cody--handle-code-lenses-display (car params)))
+    (`ignore/didChange
+     (cody--handle-ignore-did-change (car params)))
+    (`webview/postMessage
+     (cody--handle-webview-post-message (car params)))
+    (`webview/postMessageStringEncoded
+     (cody--handle-webview-post-message-string-encoded (car params)))
+    (`progress/start
+     (cody--handle-progress-start (car params)))
+    (`progress/report
+     (cody--handle-progress-report (car params)))
+    (`progress/end
+     (cody--handle-progress-end (car params)))
+    (`remoteRepo/didChange
+     (cody--handle-remote-repo-did-change (car params)))
+    (`remoteRepo/didChangeState
+     (cody--handle-remote-repo-did-change-state (car params)))
+    (_
+     (error "Received unknown notification from server: %s" method))))
+
+(defun cody--request-dispatcher (conn method &rest params)
+  "Dispatch JSON-RPC requests from the server based on METHOD and PARAMS.
+CONN is the connection to the agent."
+  (pcase method
+    (`window/showMessage
+     (cody--handle-window-show-message (car params)))
+    (`textDocument/edit
+     (cody--handle-text-document-edit (car params)))
+    (`textDocument/openUntitledDocument
+     (cody--handle-text-document-open-untitled-document (car params)))
+    (`textDocument/show
+     (cody--handle-text-document-show (car params)))
+    (`workspace/edit
+     (cody--handle-workspace-edit (car params)))
+    (`webview/create
+     (cody--handle-webview-create (car params)))
+    (_
+     (error "Received unknown method from server: %s" method))))
+
+(defun cody--handle-text-document-edit (params)
+  "Handle the 'textDocument/edit' request with PARAMS from the server."
+  (let((uri (plist-get params :uri))
+       (edits (plist-get params :edits)))
+    (cody--log "Editing document at %s with %d edits." uri (length edits))
+    ;; Example: Applying edits (this is simplified for demonstration purposes)
+    (dolist (edit edits)
+      (let ((edit-type (plist-get edit :type)))
+        (pcase edit-type
+          ("replace" (cody--log "Replace text in range %s with %s"
+                                (plist-get edit :range)
+                                (plist-get edit :value)))
+          ("insert" (cody--log "Insert text %s at position %s"
+                               (plist-get edit :value)
+                               (plist-get edit :position)))
+          ("delete" (cody--log "Delete text in range %s"
+                               (plist-get edit :range))))))
+    t)) ;; Stub implementation returning success
+
+(defun cody--handle-text-document-open-untitled-document (params)
+  "Handle the 'textDocument/openUntitledDocument' request with PARAMS from the server."
+  (let ((uri (plist-get params :uri))
+        (content (plist-get params :content))
+        (language (plist-get params :language)))
+    (cody--log "Opening untitled document: %s\nContent: %s\nLanguage: %s"
+               uri content language)
+    t)) ;; Stub implementation returning success
+
+(defun cody--handle-text-document-show (params)
+  "Handle the 'textDocument/show' request with PARAMS from the server."
+  (let ((uri (plist-get params :uri))
+        (options (plist-get params :options)))
+    (cody--log "Showing document: %s\nOptions: %s" uri options)
+    ;; Example: Focus the specified document (this is simplified for demonstration purposes)
+    (when options
+      (when (plist-get options :preserveFocus)
+        (cody--log "Preserving focus for document: %s" uri))
+      (when (plist-get options :preview)
+        (cody--log "Showing preview for document: %s" uri))
+      (when (plist-get options :selection)
+        (cody--log "Selecting range: %s in document: %s" (plist-get options :selection) uri)))
+    t)) ;; Stub implementation returning success
+
+(defun cody--handle-workspace-edit (params)
+  "Handle the 'workspace/edit' request with PARAMS from the server."
+  (let ((operations (plist-get params :operations))
+        (metadata (plist-get params :metadata)))
+    (cody--log "Applying workspace edit with %d operations" (length operations))
+    ;; Example: Handle each type of operation (this is simplified for demonstration purposes)
+    (dolist (operation operations)
+      (let ((op-type (plist-get operation :type)))
+        (pcase op-type
+          ("create-file" (cody--log "Creating file: %s\nText: %s"
+                                    (plist-get operation :uri)
+                                    (plist-get operation :textContents)))
+          ("rename-file" (cody--log "Renaming file from %s to %s"
+                                    (plist-get operation :oldUri)
+                                    (plist-get operation :newUri)))
+          ("delete-file" (cody--log "Deleting file: %s"
+                                    (plist-get operation :uri)))
+          ("edit-file" (cody--log "Editing file: %s with %d edits"
+                                  (plist-get operation :uri)
+                                  (length (plist-get operation :edits)))))))
+    t)) ;; Stub implementation returning success
+
+(defun cody--handle-webview-create (params)
+  "Handle the 'webview/create' request with PARAMS from the server."
+  (let ((id (plist-get params :id))
+        (data (plist-get params :data)))
+    (cody--log "Creating webview with id: %s\nData: %s" id data))
+  nil) ;; TODO: return value
+
+(defun cody--handle-debug-message (params)
+  "Handle 'debug/message' notification with PARAMS from the server."
+  (let ((message (plist-get params :message)))
+    (cody--log "Agent debug: %s" message)))
+
+(defun cody--handle-edit-task-did-update (params)
+  "Handle 'editTask/didUpdate' notification with PARAMS from the server."
+  (let ((task-id (plist-get params :id))
+        (task-state (plist-get params :state)))
+    (cody--log "Edit Task Updated: ID=%s, State=%s" task-id task-state)))
+
+(defun cody--handle-edit-task-did-delete (params)
+  "Handle 'editTask/didDelete' notification with PARAMS from the server."
+  (let ((task-id (plist-get params :id)))
+    (cody--log "Edit Task Deleted: ID=%s" task-id)))
+
+(defun cody--handle-code-lenses-display (params)
+  "Handle 'codeLenses/display' notification with PARAMS from the server."
+  (cody--log "Display Code Lenses: %s" params))
+
+(defun cody--handle-ignore-did-change (params)
+  "Handle 'ignore/didChange' notification."
+  (cody--log "Ignore settings changed."))
+
+(defun cody--handle-webview-post-message (params)
+  "Handle 'webview/postMessage' notification with PARAMS from the server."
+  (let ((id (plist-get params :id))
+        (message (plist-get params :message)))
+    (cody--log "Webview Post Message: ID=%s, Message=%s" id message)))
+
+(defun cody--handle-webview-post-message-string-encoded (params)
+  "Handle 'webview/postMessageStringEncoded' notification with PARAMS from the server."
+  (let ((id (plist-get params :id))
+        (encoded-message (plist-get params :stringEncodedMessage)))
+    (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
+
+(defun cody--handle-progress-start (params)
+  "Handle 'progress/start' notification with PARAMS from the server."
+  (let ((id (plist-get params :id))
+        (title (plist-get params :title)))
+    (cody--log "Progress Start: ID=%s, Title=%s" id title)))
+
+(defun cody--handle-progress-report (params)
+  "Handle 'progress/report' notification with PARAMS from the server."
+  (let ((id (plist-get params :id))
+        (percentage (plist-get params :percentage)))
+    (cody--log "Progress Report: ID=%s, Percentage=%s" id (or percentage "N/A"))))
+
+(defun cody--handle-progress-end (params)
+  "Handle 'progress/end' notification with PARAMS from the server."
+  (let ((id (plist-get params :id)))
+    (cody--log "Progress End: ID=%s" id)))
+
+(defun cody--handle-remote-repo-did-change (params)
+  "Handle 'remoteRepo/didChange' notification."
+  (cody--log "Remote repository list changed."))
+
+(defun cody--handle-remote-repo-did-change-state (params)
+  "Handle 'remoteRepo/didChangeState' notification with PARAMS from the server."
+  (cody--log "Remote repository fetch state changed: %s" params))
 
 (provide 'cody)
 ;;; cody.el ends here
