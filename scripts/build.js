@@ -1,6 +1,7 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const fsExtra = require('fs-extra');
 
 const codyDir = process.env.CODY_DIR;
 
@@ -21,7 +22,7 @@ if (!fs.existsSync(agentDistDir)) {
     process.exit(1);
 }
 
-try {
+try{
     console.log('Running pnpm install...');
     execSync('pnpm install', { cwd: agentDir, stdio: 'inherit' });
 
@@ -32,44 +33,12 @@ try {
     process.exit(1);
 }
 
-if (!fs.existsSync(distDir)) {
-    fs.mkdirSync(distDir);
+try {
+    console.log(`Copying from ${agentDistDir} to ${distDir}...`);
+    fsExtra.copySync(agentDistDir, distDir, { overwrite: true });
+    console.log('Directory copied successfully!');
+} catch (error) {
+    console.error('Failed to copy directory:', error.message);
 }
-
-const filesToCopy = [
-    'index.js',
-    'index.js.map'
-];
-
-filesToCopy.forEach(file => {
-    const srcFile = path.join(agentDistDir, file);
-    const destFile = path.join(distDir, file);
-
-    try {
-        if (fs.existsSync(srcFile)) {
-            fs.copyFileSync(srcFile, destFile);
-            console.log(`Copied ${file} to ${distDir}`);
-        } else {
-            console.error(`File does not exist: ${srcFile}`);
-        }
-    } catch (error) {
-        console.error(`Failed to copy ${file}:`, error.message);
-    }
-});
-
-const wasmFiles = fs.readdirSync(agentDistDir)
-    .filter(file => file.endsWith('.wasm'));
-
-wasmFiles.forEach(file => {
-    const srcFile = path.join(agentDistDir, file);
-    const destFile = path.join(distDir, file);
-
-    try {
-        fs.copyFileSync(srcFile, destFile);
-        console.log(`Copied ${file} to ${distDir}`);
-    } catch (error) {
-        console.error(`Failed to copy ${file}:`, error.message);
-    }
-});
 
 console.log('Build and copy completed.');
