@@ -36,7 +36,8 @@ to rebuild and re-copy the distribution files into `./dist/`
 
 To collect the command line and stderr output, change
 `cody--agent-command` to wrap the command line in
-`scripts/tee-stderr.sh`.
+`scripts/tee-stderr.sh`. The command line and stderr will be appended
+to `/tmp/error_log.txt`.
 
 *** Tree-sitter grammars
 
