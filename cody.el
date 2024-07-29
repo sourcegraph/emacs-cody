@@ -1324,7 +1324,7 @@ Installed on `post-command-hook'."
         ;; Have a new request replace any pending request.
         (when cody--post-command-debounce-timer
           (cancel-timer cody--post-command-debounce-timer))
-        (run-with-idle-timer 0 nil #'cody--handle-selection-change))
+        (run-with-idle-timer 0.1 nil #'cody--handle-selection-change))
     (error (cody--log "Error in `cody--post-command': %s: %s"
                       buffer-file-name err))))
 
