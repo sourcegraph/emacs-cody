@@ -1,2 +1,42 @@
-#!/bin/sh
-node ./scripts/build.js
+#!/bin/bash
+
+# Ensure script exits on error
+set -e
+
+# Determine environment variables and paths
+CODY_DIR=${CODY_DIR:-}
+AGENT_DIR=${CODY_DIR:+$CODY_DIR/agent}
+AGENT_DIR=${AGENT_DIR:-$(dirname "$(dirname "$(dirname "$0")")")/cody/agent}
+DIST_DIR=$(dirname "$0")/../dist
+
+# Show agent directory
+echo "Using agent directory: $AGENT_DIR"
+
+# Check existence of agent directory
+if [[ ! -d "$AGENT_DIR" ]]; then
+  echo "Agent directory does not exist: $AGENT_DIR"
+  exit 1
+fi
+
+AGENT_DIST_DIR="$AGENT_DIR/dist"
+if [[ ! -d "$AGENT_DIST_DIR" ]]; then
+  echo "Agent dist directory does not exist: $AGENT_DIST_DIR"
+  exit 1
+fi
+
+# Run pnpm install and build
+echo "Running pnpm install..."
+pnpm install --prefix "$AGENT_DIR"
+
+echo "Running pnpm build..."
+cd "$AGENT_DIR"
+pnpm build
+
+# Create dist directory if it doesn't exist
+mkdir -p "$DIST_DIR"
+
+# Copy files from agent dist to dist directory
+echo "Copying from $AGENT_DIST_DIR to $DIST_DIR..."
+cp -r "$AGENT_DIST_DIR"/* "$DIST_DIR"
+
+echo "Build and copy completed."
