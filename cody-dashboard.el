@@ -106,9 +106,7 @@ Argument ERROR-COUNT is the number of error or unconnected workspaces."
   (cody--dashboard-insert-header "Global Info")
   (insert "\n")
   (cody--dashboard-insert-field "  Cody Global Mode"
-                                (if cody--global-mode "Enabled" "Disabled")
-                                (if cody--global-mode 'cody-dashboard-status-success
-                                  'cody-dashboard-status-error))
+                                (if cody--global-mode "Enabled" "Disabled"))
   (cody--dashboard-insert-field "  Number of Cody Workspaces"
                                 (number-to-string (hash-table-count cody-workspaces)))
   (cody--dashboard-insert-field "  Active Workspaces"
@@ -127,6 +125,10 @@ Argument ERROR-COUNT is the number of error or unconnected workspaces."
         (progn
           (cody--dashboard-insert-field
            "  Name" (cody--server-info-name server-info))
+          (cody--dashboard-insert-field
+           "  Type" (if cody-use-remote-agent
+                        (format "remote on port %s" cody-remote-agent-port)
+                      "local"))
 
           (cody--dashboard-insert-field
            "  Authenticated"
