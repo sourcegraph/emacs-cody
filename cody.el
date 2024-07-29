@@ -2355,6 +2355,13 @@ to see the current completion response object in detail.
                        (eieio-class-slots (eieio-object-class obj))))))
     (pop-to-buffer buf)))
 
+;; Chat
+
+(defun cody--chat-new ()
+  "Start a new Cody chat session."
+  (interactive)
+  (cody--request 'chat/web/new nil))
+
 ;; Server (agent) requests and notifications.
 
 (defun cody--notification-dispatcher (conn method &rest params)
