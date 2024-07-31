@@ -29,6 +29,7 @@
 (require 'cody-diff)
 (require 'cody-repo-util)
 (require 'cody-dashboard)
+(require 'cody-web-chat)
 
 ;;; Custom variables.
 
