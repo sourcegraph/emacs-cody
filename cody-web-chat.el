@@ -18,8 +18,22 @@ Adds thunks to communicate with the emacs client."
   (let ((api "<head>
 <script>
 globalThis.acquireVsCodeApi = (function() {
+  function getQueryParams() {
+    const params = {};
+    const search = window.location.search.substring(1); // Remove the leading '?'
+    if (search) {
+      const pairs = search.split('&');
+      for (const pair of pairs) {
+        const [key, value] = pair.split('=');
+        params[decodeURIComponent(key)] = decodeURIComponent(value || '');
+      }
+    }
+    return params;
+  }
+
   let acquired = false;
   let state = undefined;
+  const id = getQueryParams()['id'];
 
   let socket = new WebSocket(`ws://${window.location.host}/ws${window.location.search}`)
   socket.onmessage = (event) => {
@@ -34,6 +48,10 @@ globalThis.acquireVsCodeApi = (function() {
       console.warn('do not know how to handle ws message', message);
       break;
     }
+  };
+  socket.onopen = (event) => {
+    // TODO: This event is not necessary, we could use WebSocket connection as a ready signal.
+    socket.send(JSON.stringify({what: 'ready', data: { id: id }}));
   };
   socket.onclose = (event) => {
     console.warn('socket closed, NYI reconnection', event);
@@ -51,6 +69,7 @@ globalThis.acquireVsCodeApi = (function() {
       postMessage: function(message) {
         socket.send(JSON.stringify({
           what: 'postMessageStringEncoded',
+          id,
           data: JSON.stringify(message)
         }));
       },

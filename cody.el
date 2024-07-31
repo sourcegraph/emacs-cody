@@ -2499,12 +2499,16 @@ to see the current completion response object in detail.
   "Handle incoming WebSocket message."
   (let* ((json-object-type 'plist)
          (data (json-read-from-string frame))
-         (type (plist-get data :type))
-         (payload (plist-get data :payload)))
+         (what (plist-get data :what))
+         ;; TODO: This ID is associated with the websocket connection so use that instead.
+         (id (plist-get data :id))
+         (payload (plist-get data :data)))
     (cond
+     ((string= type "postMessageStringEncoded")
+      (cody--request 'webview/receiveMessageStringEncoded
+                     (list :id id :messageStringEncoded payload)))
      ((string= type "ready")
       (cody--handle-panel-ready ws payload))
-     ;; Add more message types as needed
      (t
       (cody--log "Unknown message type: %s" type)))))
 
@@ -2742,8 +2746,16 @@ CONN is the connection to the agent."
 (defun cody--handle-webview-post-message-string-encoded (params)
   "Handle 'webview/postMessageStringEncoded' notification with PARAMS from the server."
   (let ((id (plist-get params :id))
-        (encoded-message (plist-get params :stringEncodedMessage)))
-    (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
+        (encoded-message (plist-get params :stringEncodedMessage))
+        (panel (gethash id cody--chat-panels)))
+    (if panel
+        (if (cody--chat-connection-ready panel)
+            (ws-send (cody--chat-connection-websocket panel)
+                     ; See cody--web-rewrite-root-html
+                     (json-encode `((what . "postMessageStringEncoded")
+                                    (data . ,encoded-message))))
+          (cody--log "Error: No chat connection ready for id %s, the producer should wait for the webview to be ready" id)
+      (cody--log "Error: No chat panel found for id %s" id)))))
 
 (defun cody--handle-webview-create-webview-panel (params)
   "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
