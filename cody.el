@@ -2397,9 +2397,12 @@ to see the current completion response object in detail.
 (defun cody--chat-new ()
   "Start a new Cody chat session."
   (interactive)
-  (cody--webserver-start)
-  (run-with-idle-timer 0 nil (lambda ()
-                               (cody--request 'chat/web/new nil))))
+  (if (cody--alive-p)
+      (progn
+        (cody--webserver-start)
+        (run-with-idle-timer 0 nil (lambda ()
+                                     (cody--request 'chat/web/new nil))))
+    (message "Cody is not running; use `cody-login' to get started.")))
 
 (defun cody--webserver-start ()
   "Start the webserver with HTTP and WebSocket support."
