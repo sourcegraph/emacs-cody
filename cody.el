@@ -1664,7 +1664,7 @@ This function is idempotent and only starts a new connection if needed."
 (defun cody-logout (&optional quiet)
   "Stop the Cody agent process and turn Cody off globally."
   (interactive)
-  (cody--stop-webserver)
+  (cody--webserver-stop)
   (ignore-errors
     ;; Don't kill the event buffers; let them truncate automatically.
     ;; They often have useful debugging information.
@@ -2393,14 +2393,16 @@ to see the current completion response object in detail.
 (defun cody--chat-new ()
   "Start a new Cody chat session."
   (interactive)
-  (cody--start-webserver)
+  (cody--webserver-start)
   (run-with-idle-timer 0 nil (lambda ()
                                (cody--request 'chat/web/new nil))))
 
-(defun cody--start-webserver ()
+(defun cody--webserver-start ()
   "Start the webserver with HTTP and WebSocket support."
   (unless (and cody--webserver-process
                (process-live-p cody--webserver-process))
+    (when cody--webserver-process
+      (ignore-errors (kill-process cody--webserver-process)))
     (setq cody--webserver-process 
           (ws-start
            (lambda (request)
