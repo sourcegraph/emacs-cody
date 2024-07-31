@@ -2451,21 +2451,17 @@ to see the current completion response object in detail.
 
 (defun cody--handle-web-subresource (process path)
   "Serves webview subresources from the extension bundle."
-  (message "serving subresource request %s" path)
-  (let* ((mime-types '((".js" . "text/javascript")
-                       (".css" . "text/css")
-                       (".html" . "text/html")
-                       (".ttf" . "font/ttf")
-                       (".svg" . "image/svg+xml")))
+  (let* ((mime-types '(("js" . "text/javascript")
+                       ("css" . "text/css")
+                       ("html" . "text/html")
+                       ("ttf" . "font/ttf")
+                       ("svg" . "image/svg+xml")))
          (mime-type (cdr (assoc (file-name-extension path) mime-types)))
          (resource-path (expand-file-name path cody--cody-agent-bundle)))
     (if (ws-in-directory-p cody--cody-agent-bundle resource-path)
-        (progn
-          (message "serving file %s" resource-path)
-          (ws-response-header process 200 '("content-type" . mime-type))
-          (ws-send-file process resource-path)
-      (ws-send-404 process (format "%s not found" path))))))
-                   
+        (ws-send-file process resource-path mime-type)
+      (ws-send-404 process (format "%s not found" path)))))
+
 (defun cody--handle-websocket (request)
   "Handle WebSocket connections."
   (ws-web-socket-connect
