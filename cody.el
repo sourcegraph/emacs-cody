@@ -852,6 +852,13 @@ Returns a `cody-server-info' instance."
                      :codyVersion (plist-get response :codyVersion)
                      :authStatus auth-status-instance))))
 
+(defvar cody--chat-web-server-port 1237
+  "Port to run a webserver for the chat view.")
+
+(defun cody--chat-web-server-origin ()
+  "Return the origin (URL without path) of the chat webserver."
+  (format "http://localhost:%d" cody--chat-web-server-port))
+
 (defun cody--client-capabilities ()
   "Return the Cody features that we support in the Emacs client."
   (list :edit "enabled"
@@ -863,8 +870,8 @@ Returns a `cody-server-info' instance."
         :progressBars "none"
         :webviewMessages "string-encoded"
         :webview (list :type "native"
-                       :cspSource "'self' http://loalhost:1237"
-                       :webviewBundleServingPrefix "http://localhost:1237/")))
+                       :cspSource(format  "'self' %s" (cody--chat-web-server-origin))
+                       :webviewBundleServingPrefix (format "%s/" (cody--chat-web-server-origin)))))
 
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
@@ -2283,6 +2290,7 @@ For more detailed documentation and customization options, please visit:
      :client "EMACS_CODY_EXTENSION"
      :deviceID uuid)))
 
+
 ;;; Event log
 
 (defvar cody-event-log-keywords
@@ -2390,8 +2398,8 @@ to see the current completion response object in detail.
                   (t
                    (cody--handle-default process uri))))
                (cody--cleanup-request request)))
-           8080))
-    (cody--log "Web server started.")))
+           cody--chat-web-server-port))
+    (cody--log "Web server started on port %d" cody--chat-web-server-port)))
 
 (defun cody--handle-stub1 (process)
   "Handler for /stub1 that returns a stub response."
@@ -2443,8 +2451,7 @@ CONN is the connection to the agent."
     (`webview/postMessageStringEncoded
      (cody--handle-webview-post-message-string-encoded (car params)))
     (`webview/createWebviewPanel
-     (let ((handle (plist-get (car params) :handle)))
-       (cody--log "webview/createWebviewPanel with handle %s" handle)))
+     (cody--handle-webview-create-webview-panel params))
     (`webview/dispose
      (cody--log "TODO: webview/dispose"))
     (`webview/reveal
@@ -2590,6 +2597,11 @@ CONN is the connection to the agent."
   "Handle 'ignore/didChange' notification."
   (cody--log "Ignore settings changed."))
 
+(defun cody--handle-webview-create-webview-panel (params)
+  "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
+  (let ((handle (plist-get (car params) :handle)))
+    (browse-url (cody--chat-web-server-origin))))
+
 (defun cody--handle-webview-post-message (params)
   "Handle 'webview/postMessage' notification with PARAMS from the server."
   (let ((id (plist-get params :id))
@@ -2600,7 +2612,7 @@ CONN is the connection to the agent."
   "Handle 'webview/postMessageStringEncoded' notification with PARAMS from the server."
   (let ((id (plist-get params :id))
         (encoded-message (plist-get params :stringEncodedMessage)))
-    (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
+  (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
 
 (defun cody--handle-progress-start (params)
   "Handle 'progress/start' notification with PARAMS from the server."
