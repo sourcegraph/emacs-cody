@@ -858,9 +858,9 @@ Returns a `cody-server-info' instance."
         :untitledDocuments "enabled"
         :progressBars "none"
         :webviewMessages "string-encoded"
-        :webview '(:type "native"
-                         :cspSource "'self' http://loalhost:1237"
-                         :webviewBundleServingPrefix "http://localhost:1237/")))
+        :webview (list :type "native"
+                       :cspSource "'self' http://loalhost:1237"
+                       :webviewBundleServingPrefix "http://localhost:1237/")))
 
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
@@ -2364,7 +2364,7 @@ to see the current completion response object in detail.
 (defun cody--chat-new ()
   "Start a new Cody chat session."
   (interactive)
-  (run-with-idle-timer 0 nil (lamba ()
+  (run-with-idle-timer 0 nil (lambda ()
                                     (cody--request 'chat/web/new nil))))
 
 ;; Server (agent) requests and notifications.
