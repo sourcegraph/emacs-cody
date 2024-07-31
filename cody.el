@@ -409,6 +409,18 @@ Argument CC is the completion object."
                     "dist" "index.js")
   "Path to bundled cody agent.")
 
+(cl-defstruct cody--chat-panel-connection
+  "Data associated with a cody chat panel."
+  (id nil :type string)
+  (buffered-html nil :type string)
+  (buffered-options nil :type list)
+  (websocket nil :type (or null ws-web-socket))
+  (ready nil :type boolean))
+
+(defvar cody--chat-panels (make-hash-table :test 'equal)
+  "Hash table to store chat panel connections.
+Keys are string panel ids. Values are `cody--chat-panel-connection' objects.")
+
 ;; It might seem odd to have a separate Node process for each workspace,
 ;; but it makes things more flexible in general; e.g. integration testing
 ;; without interfering with your normal Cody session, or hitting dev backends.
@@ -456,7 +468,7 @@ When testing, the calls go through to the LLM.")
   "Port to run a webserver for the chat view.")
 
 (defvar cody--chat-processes (make-hash-table :test 'equal)
-  "Hash table mapping chat IDs to their corresponding process handles.")
+  "Map of chat IDs to their corresponding process handles.")
 
 (defconst cody-log-buffer-name "*cody-log*"
   "Cody log messages.
@@ -2385,7 +2397,7 @@ to see the current completion response object in detail.
                                (cody--request 'chat/web/new nil))))
 
 (defun cody--start-webserver ()
-  "Start the webserver with a single handler function."
+  "Start the webserver with HTTP and WebSocket support."
   (unless (and cody--webserver-process
                (process-live-p cody--webserver-process))
     (setq cody--webserver-process 
@@ -2394,60 +2406,121 @@ to see the current completion response object in detail.
              (with-slots (process headers) request
                (let ((uri (cdr (assoc :GET headers))))
                  (cond
-                  ((string= uri "/stub1")
-                   (cody--handle-stub1 process))
-                  ((string= uri "/stub2")
-                   (cody--handle-stub2 process))
+                  ((string= uri "/ws")
+                   (if (ws-web-socket-connect request nil)
+                       (cody--handle-websocket request)
+                     (cody--handle-default process uri)))
                   (t
                    (cody--handle-default process uri))))
                (cody--cleanup-request request)))
            cody--chat-web-server-port))
     (cody--log "Web server started on port %d" cody--chat-web-server-port)))
 
-(defun cody--handle-stub1 (process)
-  "Handler for /stub1 that returns a stub response."
-  (ws-response-header process 200 '("Content-Type" . "text/plain"))
-  (process-send-string process "You have reached /stub1\n"))
+(defun cody--handle-websocket (request)
+  "Handle WebSocket connections."
+  (ws-web-socket-connect
+   request
+   ;; On open
+   (lambda (ws)
+     (cody--log "WebSocket connection opened")
+     (let* ((id (cody--extract-id-from-websocket-request request))
+            (panel (gethash id cody--chat-panels)))
+       (if panel
+           (progn
+             (setf (cody--chat-panel-connection-websocket panel) ws)
+             (setf (cody--chat-panel-connection-ready panel) t)
+             (cody--send-buffered-data panel))
+         (cody--log "Error: No chat panel found for id %s" id))))
+   ;; On message
+   (lambda (ws frame)
+     (cody--log "Received WebSocket message: %s" frame)
+     (cody--handle-websocket-message ws frame))
+   ;; On close
+   (lambda (ws)
+     (cody--log "WebSocket connection closed")
+     (cody--remove-chat-panel-by-websocket ws))))
 
-(defun cody--handle-stub2 (process)
-  "Handler for /stub2 that returns a stub response."
-  (ws-response-header process 200 '("Content-Type" . "text/plain"))
-  (process-send-string process "You have reached /stub2\n"))
+(defun cody--extract-id-from-websocket-request (request)
+  "Extract chat ID from WebSocket request query string."
+  (let* ((headers (oref request headers))
+         (uri (or (cdr (assoc :GET headers))
+                  (cdr (assoc :URI headers))))
+         (query-string (cadr (split-string uri "?"))))
+    (when (and query-string (string-match "id=\\([^&]+\\)" query-string))
+      (match-string 1 query-string))))
 
-(defun cody--handle-default (process uri)
-  "Default handler that returns a stub response based on the URI."
-  (ws-response-header process 200 '("Content-Type" . "text/plain"))
-  (process-send-string process 
-                       (format "You have reached the default handler at %s\n" uri)))
+(defun cody--handle-websocket-message (ws frame)
+  "Handle incoming WebSocket message."
+  (let* ((json-object-type 'plist)
+         (data (json-read-from-string frame))
+         (type (plist-get data :type))
+         (payload (plist-get data :payload)))
+    (cond
+     ((string= type "ready")
+      (cody--handle-panel-ready ws payload))
+     ;; Add more message types as needed
+     (t
+      (cody--log "Unknown message type: %s" type)))))
 
-(defun cody--cleanup-request (request)
-  "Clean up after processing the REQUEST."
-  (ignore-errors 
-    (delete-process (oref request process))))
+(defun cody--handle-panel-ready (ws payload)
+  "Handle panel ready message."
+  (let ((id (plist-get payload :id)))
+    (when-let ((panel (gethash id cody--chat-panels)))
+      (setf (cody--chat-panel-connection-ready panel) t)
+      (cody--send-buffered-data panel))))
 
-(defun cody--stop-webserver ()
-  "Stop the webserver if it is running."
-  (when (and cody--webserver-process
-             (process-live-p cody--webserver-process))
-    (ws-stop cody--webserver-process)
-    (cody--log "Web server stopped."))
-  (setq cody--webserver-process nil))
+(defun cody--create-chat-panel (id)
+  "Create a new chat panel connection."
+  (let ((panel (make-cody--chat-panel-connection :id id)))
+    (puthash id panel cody--chat-panels)
+    panel))
 
-(defun cody--add-chat-process (id process)
-  "Add a chat PROCESS with ID to the chat processes map."
-  (puthash id process cody--chat-processes))
+(defun cody--remove-chat-panel-by-websocket (ws)
+  "Remove chat panel connection by WebSocket."
+  (maphash (lambda (id panel)
+             (when (eq (cody--chat-panel-connection-websocket panel) ws)
+               (remhash id cody--chat-panels)))
+           cody--chat-panels))
 
-(defun cody--get-chat-process (id)
-  "Get the chat process for the given ID."
-  (gethash id cody--chat-processes))
+(defun cody--webview-create (id)
+  "Handle webview/create notification."
+  (cody--create-chat-panel id)
+  (browse-url (format "http://localhost:%d/chat/%s" cody--chat-web-server-port id)))
 
-(defun cody--remove-chat-process (id)
-  "Remove the chat process for the given ID from the map."
-  (remhash id cody--chat-processes))
+(defun cody--send-buffered-data (panel)
+  "Send buffered data to the panel if it's ready."
+  (when (cody--chat-panel-connection-ready panel)
+    (let ((ws (cody--chat-panel-connection-websocket panel)))
+      (when (cody--chat-panel-connection-buffered-options panel)
+        (ws-send ws (json-encode `((type . "setOptions")
+                                   (payload . ,(cody--chat-panel-connection-buffered-options panel)))))
+        (setf (cody--chat-panel-connection-buffered-options panel) nil))
+      (when (cody--chat-panel-connection-buffered-html panel)
+        (ws-send ws (json-encode `((type . "setHtml")
+                                   (payload . ,(cody--chat-panel-connection-buffered-html panel)))))
+        (setf (cody--chat-panel-connection-buffered-html panel) nil)))))
 
-(defun cody--chat-process-exists-p (id)
-  "Check if a chat process exists for the given ID."
-  (not (null (gethash id cody--chat-processes))))
+(defun cody--webview-setoptions (id options)
+  "Handle webview/setoptions notification."
+  (let ((panel (gethash id cody--chat-panels)))
+    (if panel
+        (if (cody--chat-panel-connection-ready panel)
+            (ws-send (cody--chat-panel-connection-websocket panel)
+                     (json-encode `((type . "setOptions")
+                                    (payload . ,options))))
+          (setf (cody--chat-panel-connection-buffered-options panel) options))
+      (cody--log "Error: No chat panel found for id %s" id))))
+
+(defun cody--webview-sethtml (id html)
+  "Handle webview/sethtml notification."
+  (let ((panel (gethash id cody--chat-panels)))
+    (if panel
+        (if (cody--chat-panel-connection-ready panel)
+            (ws-send (cody--chat-panel-connection-websocket panel)
+                     (json-encode `((type . "setHtml")
+                                    (payload . ,html))))
+          (setf (cody--chat-panel-connection-buffered-html panel) html))
+      (cody--log "Error: No chat panel found for id %s" id))))
 
 ;; Server (agent) requests and notifications.
 
