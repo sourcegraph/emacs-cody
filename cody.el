@@ -2428,7 +2428,9 @@ to see the current completion response object in detail.
   (let* ((panel (gethash id cody--chat-panels))
          (html (and panel (cody--chat-connection-buffered-html panel))))
     (cond
-     (html (process-send-string process (cody--web-rewrite-root-html html)))
+     (html (progn
+             (ws-response-header process 200 '("content-type" . "text/html"))
+             (process-send-string process (cody--web-rewrite-root-html html))))
      (t (progn
           (ws-response-header process 200 '("refresh" . "1"))
           (ws-send process "Starting chat..."))))))
