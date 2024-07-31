@@ -6,7 +6,7 @@
 ;; Author: Keegan Carruthers-Smith <keegan.csmith@gmail.com>
 ;; Maintainer: Steve Yegge <steve.yegge@gmail.com>
 ;; URL: https://github.com/sourcegraph/emacs-cody
-;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "20240201.2318"))
+;; Package-Requires: ((emacs "26.3") (jsonrpc "1.0.16") (uuidgen "20240201.2318") (web-server-0.1.2))
 ;; Keywords: completion convenience languages programming tools
 
 ;; This file is not part of GNU Emacs.
@@ -25,6 +25,7 @@
 (require 'uuidgen)
 (require 'project)
 (require 'ansi-color)
+(require 'web-server)
 (require 'cody-diff)
 (require 'cody-repo-util)
 (require 'cody-dashboard)
@@ -447,6 +448,9 @@ When testing, the calls go through to the LLM.")
 
 (defvar cody--access-token nil
   "Access token for `cody--sourcegraph-host'.")
+
+(defvar cody--webserver-process nil
+  "Web server for communicating with the chat window.")
 
 (defconst cody-log-buffer-name "*cody-log*"
   "Cody log messages.
@@ -1637,6 +1641,7 @@ This function is idempotent and only starts a new connection if needed."
 (defun cody-logout (&optional quiet)
   "Stop the Cody agent process and turn Cody off globally."
   (interactive)
+  (cody--stop-webserver)
   (ignore-errors
     ;; Don't kill the event buffers; let them truncate automatically.
     ;; They often have useful debugging information.
@@ -2364,8 +2369,58 @@ to see the current completion response object in detail.
 (defun cody--chat-new ()
   "Start a new Cody chat session."
   (interactive)
+  (cody--start-webserver)
   (run-with-idle-timer 0 nil (lambda ()
-                                    (cody--request 'chat/web/new nil))))
+                               (cody--request 'chat/web/new nil))))
+
+(defun cody--start-webserver ()
+  "Start the webserver with a single handler function."
+  (unless (and cody--webserver-process
+               (process-live-p cody--webserver-process))
+    (setq cody--webserver-process 
+          (ws-start
+           (lambda (request)
+             (with-slots (process headers) request
+               (let ((uri (cdr (assoc :GET headers))))
+                 (cond
+                  ((string= uri "/stub1")
+                   (cody--handle-stub1 process))
+                  ((string= uri "/stub2")
+                   (cody--handle-stub2 process))
+                  (t
+                   (cody--handle-default process uri))))
+               (cody--cleanup-request request)))
+           8080))
+    (cody--log "Web server started.")))
+
+(defun cody--handle-stub1 (process)
+  "Handler for /stub1 that returns a stub response."
+  (ws-response-header process 200 '("Content-Type" . "text/plain"))
+  (process-send-string process "You have reached /stub1\n"))
+
+(defun cody--handle-stub2 (process)
+  "Handler for /stub2 that returns a stub response."
+  (ws-response-header process 200 '("Content-Type" . "text/plain"))
+  (process-send-string process "You have reached /stub2\n"))
+
+(defun cody--handle-default (process uri)
+  "Default handler that returns a stub response based on the URI."
+  (ws-response-header process 200 '("Content-Type" . "text/plain"))
+  (process-send-string process 
+                       (format "You have reached the default handler at %s\n" uri)))
+
+(defun cody--cleanup-request (request)
+  "Clean up after processing the REQUEST."
+  (ignore-errors 
+    (delete-process (oref request process))))
+
+(defun cody--stop-webserver ()
+  "Stop the webserver if it is running."
+  (when (and cody--webserver-process
+             (process-live-p cody--webserver-process))
+    (ws-stop cody--webserver-process)
+    (cody--log "Web server stopped."))
+  (setq cody--webserver-process nil))
 
 ;; Server (agent) requests and notifications.
 
@@ -2434,6 +2489,10 @@ CONN is the connection to the agent."
      (cody--handle-webview-create (car params)))
     (_
      (error "Received unknown method from server: %s" method))))
+
+(defun cody--handle-window-show-message ()
+  "TODO"
+  nil)
 
 (defun cody--handle-text-document-edit (params)
   "Handle the 'textDocument/edit' request with PARAMS from the server."
