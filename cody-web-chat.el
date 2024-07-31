@@ -92,12 +92,15 @@ delete window.frameElement;
     (cody--web-chat-fix-csp
      (replace-regexp-in-string "<head>" api html t t))))
 
+
+
 (defun cody--web-chat-fix-csp (html)
   "Update the Content Security Policy to allow websocket connections."
-  (let ((csp-regex "http-equiv=.Content-Security-Policy.[ \t\n\r\f]++content=\\(\".*?default-src 'none';.*?\"\\)")
-        (new-csp (format "default-src 'self'; connect-src ws://localhost:%s" cody--chat-web-server-port)))
+  (let ((csp-regex "http-equiv=.Content-Security-Policy.[ \t\n\r\f]+content=\\(\".*?default-src 'none';\\)")
+        (new-csp (format "\"default-src 'self'; connect-src ws://localhost:%s;" cody--chat-web-server-port)))
     (if (string-match csp-regex html)
-        (replace-match new-csp nil t html 1)
+        (let ((result (replace-match new-csp nil t html 1)))
+          result)
       (error "Unable to replace Content Security Policy: Not found"))))
 
 (provide 'cody-web-chat)
