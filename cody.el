@@ -2426,7 +2426,7 @@ to see the current completion response object in detail.
 (defun cody--handle-web-chat (process id)
   "Serves the browser-based web chat page."
   (let* ((panel (gethash id cody--chat-panels))
-         (html (and panel (cody--chat-panel-connetion-buffered-html panel))))
+         (html (and panel (cody--chat-connection-buffered-html panel))))
     (cond
      (html (process-send-string process (cody--web-rewrite-root-html html)))
      (t (progn
