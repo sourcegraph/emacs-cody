@@ -2403,25 +2403,25 @@ to see the current completion response object in detail.
 
 (defun cody--webserver-start ()
   "Start the webserver with HTTP and WebSocket support."
-  (cody--webserver-stop)
-  (setq cody--webserver-process
-        (ws-start
-         (lambda (request)
-           (with-slots (process headers) request
-             (let ((path (cdr (assoc :GET headers))))
-               (cond
-                ((string= path "/chat")
-                 (cody--handle-web-chat process (cdr (assoc "id" headers))))
-                ((string= path "/ws")
-                 (cody--handle-websocket request))
-                ((string-match "/static/\\(.*\\)" path)
-                 (cody--handle-web-subresource process (match-string 1 path)))
-                (t
-                 (cody--handle-default process path))))))
-         cody--chat-web-server-port
-         nil  ;; No log-buffer
-         :socket-options (list (cons 'reuse-address t))))  ;; Keyword argument for network options
-  (cody--log "Web server started on port %d" cody--chat-web-server-port))
+  (unless cody--webserver-process
+    (setq cody--webserver-process
+          (ws-start
+           (lambda (request)
+             (with-slots (process headers) request
+               (let ((path (cdr (assoc :GET headers))))
+                 (cond
+                  ((string= path "/chat")
+                   (cody--handle-web-chat process (cdr (assoc "id" headers))))
+                  ((string= path "/ws")
+                   (cody--handle-websocket request))
+                  ((string-match "/static/\\(.*\\)" path)
+                   (cody--handle-web-subresource process (match-string 1 path)))
+                  (t
+                   (cody--handle-default process path))))))
+           cody--chat-web-server-port
+           nil  ;; No log-buffer
+           :socket-options (list (cons 'reuse-address t))))  ;; Keyword argument for network options
+    (cody--log "Web server started on port %d" cody--chat-web-server-port)))
 
 (defun cody--webserver-stop ()
   "Stop the webserver."
@@ -2463,28 +2463,36 @@ to see the current completion response object in detail.
       (ws-send-404 process (format "%s not found" path)))))
 
 (defun cody--handle-websocket (request)
-  "Handle WebSocket connections."
-  (ws-web-socket-connect
-   request
-   ;; On open
-   (lambda (ws)
-     (cody--log "WebSocket connection opened")
-     (let* ((id (cody--extract-id-from-websocket-request request))
-            (panel (gethash id cody--chat-panels)))
-       (if panel
-           (progn
-             (setf (cody--chat-connection-websocket panel) ws)
-             (setf (cody--chat-connection-ready panel) t)
-             (cody--send-buffered-data panel))
-         (cody--log "Error: No chat panel found for id %s" id))))
-   ;; On message
-   (lambda (ws frame)
-     (cody--log "Received WebSocket message: %s" frame)
-     (cody--handle-websocket-message ws frame))
-   ;; On close
-   (lambda (ws)
-     (cody--log "WebSocket connection closed")
-     (cody--remove-chat-panel-by-websocket ws))))
+  "Handle incoming WebSocket connections."
+  (ws-web-socket-connect request
+                         (lambda (ws)
+                           (cody--websocket-handler-open ws request))
+                         (lambda (ws frame)
+                           (cody--websocket-handler-message ws frame))
+                         (lambda (ws)
+                           (cody--websocket-handler-close ws))))
+
+(defun cody--websocket-handler-open (ws request)
+  "Handle WebSocket connection opening."
+  (cody--log "WebSocket connection opened")
+  (let* ((id (cody--extract-id-from-websocket-request request))
+         (panel (gethash id cody--chat-panels)))
+    (if panel
+        (progn
+          (setf (cody--chat-connection-websocket panel) ws)
+          (setf (cody--chat-connection-ready panel) t)
+          (cody--send-buffered-data panel))
+      (cody--log "Error: No chat panel found for id %s" id))))
+
+(defun cody--websocket-handler-message (ws frame)
+  "Handle incoming WebSocket messages."
+  (cody--log "Received WebSocket message: %s" frame)
+  (cody--handle-websocket-message ws frame))
+
+(defun cody--websocket-handler-close (ws)
+  "Handle WebSocket connection closure."
+  (cody--log "WebSocket connection closed")
+  (cody--remove-chat-panel-by-websocket ws))
 
 (defun cody--extract-id-from-websocket-request (request)
   "Extract chat ID from WebSocket request query string."
