@@ -2399,27 +2399,35 @@ to see the current completion response object in detail.
 
 (defun cody--webserver-start ()
   "Start the webserver with HTTP and WebSocket support."
-  (unless (and cody--webserver-process
-               (process-live-p cody--webserver-process))
-    (when cody--webserver-process
-      (ignore-errors (kill-process cody--webserver-process)))
-    (setq cody--webserver-process 
-          (ws-start
-           (lambda (request)
-             (with-slots (process headers) request
-               (let ((path (cdr (assoc :GET headers))))
-                 (cond
-                  ((string= path "/chat")
-                   (cody--handle-web-chat process (cdr (assoc "id" headers))))
-                  ((string= path "/ws")
-                   (if (ws-web-socket-connect request nil)
-                       (cody--handle-websocket request)
-                     (cody--handle-default process path)))
-                  (t
-                   (cody--handle-default process path))))
-               (cody--cleanup-request request)))
-           cody--chat-web-server-port))
-    (cody--log "Web server started on port %d" cody--chat-web-server-port)))
+  (cody--webserver-stop)
+  (setq cody--webserver-process
+        (ws-start
+         (lambda (request)
+           (with-slots (process headers) request
+             (let ((path (cdr (assoc :GET headers))))
+               (cond
+                ((string= path "/chat")
+                 (cody--handle-web-chat process (cdr (assoc "id" headers))))
+                ((string= path "/ws")
+                 (if (ws-web-socket-connect request nil)
+                     (cody--handle-websocket request)
+                   (cody--handle-default process path)))
+                (t
+                 (cody--handle-default process path))))))
+         cody--chat-web-server-port
+         nil  ;; No log-buffer
+         :socket-options (list (cons 'reuse-address t))))  ;; Keyword argument for network options
+  (cody--log "Web server started on port %d" cody--chat-web-server-port))
+
+(defun cody--webserver-stop ()
+  "Stop the webserver."
+  (when cody--webserver-process
+    (when-let ((process (ws-process cody--webserver-process)))
+      (condition-case err
+          (delete-process process) ; don't use kill-process; it fails.
+        (error (cody--log "Error killing webserver process: %s" err)))
+      (setq cody--webserver-process nil)))
+  (cody--log "Web server stopped."))
 
 (defun cody--handle-default (process path)
   "Serves a 404 for any unhandled paths."
@@ -2603,7 +2611,7 @@ CONN is the connection to the agent."
     (`workspace/edit
      (cody--handle-workspace-edit (car params)))
     (`webview/create
-     ; TODO: Handle webview/create when using non-"native webview" chat.
+                                        ; TODO: Handle webview/create when using non-"native webview" chat.
      (cody--log "NYI webview/create"))
     (_
      (error "Received unknown method from server: %s" method))))
@@ -2718,7 +2726,7 @@ CONN is the connection to the agent."
   "Handle 'webview/postMessageStringEncoded' notification with PARAMS from the server."
   (let ((id (plist-get params :id))
         (encoded-message (plist-get params :stringEncodedMessage)))
-  (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
+    (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
 
 (defun cody--handle-webview-create-webview-panel (params)
   "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
