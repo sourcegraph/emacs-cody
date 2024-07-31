@@ -2405,17 +2405,33 @@ to see the current completion response object in detail.
           (ws-start
            (lambda (request)
              (with-slots (process headers) request
-               (let ((uri (cdr (assoc :GET headers))))
+               (let ((path (cdr (assoc :GET headers))))
                  (cond
-                  ((string-match "/ws.+" uri)
+                  ((string= path "/chat")
+                   (cody--handle-web-chat process (assoc "id" headers)))
+                  ((string= path "/ws")
                    (if (ws-web-socket-connect request nil)
                        (cody--handle-websocket request)
-                     (cody--handle-default process uri)))
+                     (cody--handle-default process path)))
                   (t
-                   (cody--handle-default process uri))))
+                   (cody--handle-default process path))))
                (cody--cleanup-request request)))
            cody--chat-web-server-port))
     (cody--log "Web server started on port %d" cody--chat-web-server-port)))
+
+(defun cody--handle-default (process path)
+  "Serves a 404 for any unhandled paths."
+  (ws-send-404 process path))
+
+(defun cody--handle-web-chat (process id)
+  "Serves the browser-based web chat page."
+  (let* ((panel (gethash id cody--chat-panels))
+         (html (and panel (cody--chat-panel-connetion-buffered-html panel))))
+    (cond
+     (html (process-send-string process (cody--web-rewrite-root-html html)))
+     (t (progn
+          (ws-response-header process 200 '("refresh" . "1"))
+          (ws-send process "Starting chat..."))))))
 
 (defun cody--handle-websocket (request)
   "Handle WebSocket connections."
@@ -2483,11 +2499,6 @@ to see the current completion response object in detail.
                (remhash id cody--chat-panels)))
            cody--chat-panels))
 
-(defun cody--webview-create (id)
-  "Handle webview/create notification."
-  (cody--create-chat-panel id)
-  (browse-url (format "http://localhost:%d/chat/%s" cody--chat-web-server-port id)))
-
 (defun cody--send-buffered-data (panel)
   "Send buffered data to the panel if it's ready."
   (when (cody--chat-connection-ready panel)
@@ -2543,6 +2554,8 @@ CONN is the connection to the agent."
      (cody--handle-webview-post-message (car params)))
     (`webview/postMessageStringEncoded
      (cody--handle-webview-post-message-string-encoded (car params)))
+    (`webview/createWebviewPanel
+     (cody--handle-webview-create-webview-panel (car params)))
     (`webview/dispose
      (cody--log "TODO: webview/dispose"))
     (`webview/reveal
@@ -2584,7 +2597,8 @@ CONN is the connection to the agent."
     (`workspace/edit
      (cody--handle-workspace-edit (car params)))
     (`webview/create
-     (cody--handle-webview-create (car params)))
+     ; TODO: Handle webview/create when using non-"native webview" chat.
+     (cody--log "NYI webview/create"))
     (_
      (error "Received unknown method from server: %s" method))))
 
@@ -2699,6 +2713,12 @@ CONN is the connection to the agent."
   (let ((id (plist-get params :id))
         (encoded-message (plist-get params :stringEncodedMessage)))
   (cody--log "Webview Post Message String Encoded: ID=%s, Message=%s" id encoded-message)))
+
+(defun cody--handle-webview-create-webview-panel (params)
+  "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
+  (let ((handle (plist-get (car params) :handle)))
+    (cody--create-chat-panel handle)
+    (browse-url (format "%s/chat?id=%s" (cody--chat-web-server-origin) handle))))
 
 (defun cody--handle-progress-start (params)
   "Handle 'progress/start' notification with PARAMS from the server."

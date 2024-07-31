@@ -71,3 +71,6 @@ delete window.frameElement;
 </script>
 "))
     (replace-regexp-in-string "<head>" api html t t)))
+
+(provide 'cody-web-chat)
+;;; cody-web-chat.el ends here
