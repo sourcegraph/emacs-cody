@@ -4,3 +4,15 @@ dist/index.js.map
 dist/*.exe
 dist/*.wasm
 .eask/
+dist/agent.js
+dist/cody-agent-linux-arm64
+dist/cody-agent-linux-x64
+dist/cody-agent-macos-arm64
+dist/cody-agent-macos-x64
+dist/environment*
+dist/package.json
+dist/scripts/
+dist/src/
+dist/test-agent-binary.js
+dist/tsconfig.tsbuildinfo
+dist/webviews/
