@@ -2364,7 +2364,8 @@ to see the current completion response object in detail.
 (defun cody--chat-new ()
   "Start a new Cody chat session."
   (interactive)
-  (cody--request 'chat/web/new nil))
+  (run-with-idle-timer 0 nil (lamba ()
+                                    (cody--request 'chat/web/new nil))))
 
 ;; Server (agent) requests and notifications.
 
@@ -2388,19 +2389,19 @@ CONN is the connection to the agent."
      (cody--handle-webview-post-message-string-encoded (car params)))
     (`webview/createWebviewPanel
      (let ((handle (plist-get (car params) :handle)))
-       (message "webview/createWebviewPanel with handle %s" handle)))
+       (cody--log "webview/createWebviewPanel with handle %s" handle)))
     (`webview/dispose
-     (message "TODO: webview/dispose"))
+     (cody--log "TODO: webview/dispose"))
     (`webview/reveal
-     (message "TODO: webview/reveal"))
+     (cody--log "TODO: webview/reveal"))
     (`webview/setTitle
-     (message "TODO: webview/setTitle"))
+     (cody--log "TODO: webview/setTitle"))
     (`webview/setIconPath
-     (message "TODO: webview/setIconPath"))
+     (cody--log "TODO: webview/setIconPath"))
     (`webview/setOptions
-     (message "TODO: webview/setOptions"))
+     (cody--log "TODO: webview/setOptions"))
     (`webview/setHtml
-     (message "TODO: webview/setHtml"))
+     (cody--log "TODO: webview/setHtml"))
     (`webview/registerWebviewViewProvider nil)
     (`progress/start
      (cody--handle-progress-start (car params)))
