@@ -404,11 +404,15 @@ Argument CC is the completion object."
 
 (defconst cody--dotcom-url "https://sourcegraph.com/")
 
-(defconst cody--cody-agent
+(defconst cody--cody-agent-bundle
   (file-name-concat (file-name-directory (or load-file-name
                                              (buffer-file-name)))
-                    "dist" "index.js")
-  "Path to bundled cody agent.")
+                    "dist")
+  "Path to bundled cody agent resources.")
+
+(defconst cody--cody-agent
+  (file-name-concat cody--cody-agent-bundle "index.js")
+  "Path to bundled cody agent script.")
 
 (cl-defstruct cody--chat-connection
   "Data associated with a cody chat panel."
@@ -887,7 +891,7 @@ Returns a `cody-server-info' instance."
         :webviewMessages "string-encoded"
         :webview (list :type "native"
                        :cspSource(format  "'self' %s" (cody--chat-web-server-origin))
-                       :webviewBundleServingPrefix (format "%s/" (cody--chat-web-server-origin)))))
+                       :webviewBundleServingPrefix (format "%s/static" (cody--chat-web-server-origin)))))
 
 (defun cody--extension-configuration ()
   "Which `ExtensionConfiguration' parameters to send on Agent handshake."
@@ -2412,6 +2416,8 @@ to see the current completion response object in detail.
                  (if (ws-web-socket-connect request nil)
                      (cody--handle-websocket request)
                    (cody--handle-default process path)))
+                ((string-match "/static/\\(.*\\)" path)
+                 (cody--handle-web-subresource process (match-string 1 path)))
                 (t
                  (cody--handle-default process path))))))
          cody--chat-web-server-port
@@ -2431,7 +2437,7 @@ to see the current completion response object in detail.
 
 (defun cody--handle-default (process path)
   "Serves a 404 for any unhandled paths."
-  (ws-send-404 process path))
+  (ws-send-404 process (format "Not found: %s" path)))
 
 (defun cody--handle-web-chat (process id)
   "Serves the browser-based web chat page."
@@ -2445,6 +2451,23 @@ to see the current completion response object in detail.
           (ws-response-header process 200 '("refresh" . "1"))
           (ws-send process "Starting chat..."))))))
 
+(defun cody--handle-web-subresource (process path)
+  "Serves webview subresources from the extension bundle."
+  (message "serving subresource request %s" path)
+  (let* ((mime-types '((".js" . "text/javascript")
+                       (".css" . "text/css")
+                       (".html" . "text/html")
+                       (".ttf" . "font/ttf")
+                       (".svg" . "image/svg+xml")))
+         (mime-type (cdr (assoc (file-name-extension path) mime-types)))
+         (resource-path (expand-file-name path cody--cody-agent-bundle)))
+    (if (ws-in-directory-p cody--cody-agent-bundle resource-path)
+        (progn
+          (message "serving file %s" resource-path)
+          (ws-response-header process 200 '("content-type" . mime-type))
+          (ws-send-file process resource-path)
+      (ws-send-404 process (format "%s not found" path))))))
+                   
 (defun cody--handle-websocket (request)
   "Handle WebSocket connections."
   (ws-web-socket-connect
