@@ -452,6 +452,12 @@ When testing, the calls go through to the LLM.")
 (defvar cody--webserver-process nil
   "Web server for communicating with the chat window.")
 
+(defvar cody--chat-web-server-port 1237
+  "Port to run a webserver for the chat view.")
+
+(defvar cody--chat-processes (make-hash-table :test 'equal)
+  "Hash table mapping chat IDs to their corresponding process handles.")
+
 (defconst cody-log-buffer-name "*cody-log*"
   "Cody log messages.
 This log is shared across all agent connections.")
@@ -851,9 +857,6 @@ Returns a `cody-server-info' instance."
                      :codyEnabled (cjf (plist-get response :codyEnabled))
                      :codyVersion (plist-get response :codyVersion)
                      :authStatus auth-status-instance))))
-
-(defvar cody--chat-web-server-port 1237
-  "Port to run a webserver for the chat view.")
 
 (defun cody--chat-web-server-origin ()
   "Return the origin (URL without path) of the chat webserver."
@@ -2430,6 +2433,22 @@ to see the current completion response object in detail.
     (cody--log "Web server stopped."))
   (setq cody--webserver-process nil))
 
+(defun cody--add-chat-process (id process)
+  "Add a chat PROCESS with ID to the chat processes map."
+  (puthash id process cody--chat-processes))
+
+(defun cody--get-chat-process (id)
+  "Get the chat process for the given ID."
+  (gethash id cody--chat-processes))
+
+(defun cody--remove-chat-process (id)
+  "Remove the chat process for the given ID from the map."
+  (remhash id cody--chat-processes))
+
+(defun cody--chat-process-exists-p (id)
+  "Check if a chat process exists for the given ID."
+  (not (null (gethash id cody--chat-processes))))
+
 ;; Server (agent) requests and notifications.
 
 (defun cody--notification-dispatcher (conn method &rest params)
@@ -2450,8 +2469,6 @@ CONN is the connection to the agent."
      (cody--handle-webview-post-message (car params)))
     (`webview/postMessageStringEncoded
      (cody--handle-webview-post-message-string-encoded (car params)))
-    (`webview/createWebviewPanel
-     (cody--handle-webview-create-webview-panel params))
     (`webview/dispose
      (cody--log "TODO: webview/dispose"))
     (`webview/reveal
@@ -2596,11 +2613,6 @@ CONN is the connection to the agent."
 (defun cody--handle-ignore-did-change (params)
   "Handle 'ignore/didChange' notification."
   (cody--log "Ignore settings changed."))
-
-(defun cody--handle-webview-create-webview-panel (params)
-  "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
-  (let ((handle (plist-get (car params) :handle)))
-    (browse-url (cody--chat-web-server-origin))))
 
 (defun cody--handle-webview-post-message (params)
   "Handle 'webview/postMessage' notification with PARAMS from the server."
