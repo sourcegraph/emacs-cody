@@ -2408,7 +2408,7 @@ to see the current completion response object in detail.
                (let ((path (cdr (assoc :GET headers))))
                  (cond
                   ((string= path "/chat")
-                   (cody--handle-web-chat process (assoc "id" headers)))
+                   (cody--handle-web-chat process (cdr (assoc "id" headers))))
                   ((string= path "/ws")
                    (if (ws-web-socket-connect request nil)
                        (cody--handle-websocket request)
@@ -2523,9 +2523,11 @@ to see the current completion response object in detail.
           (setf (cody--chat-connection-buffered-options panel) options))
       (cody--log "Error: No chat panel found for id %s" id))))
 
-(defun cody--webview-sethtml (id html)
+(defun cody--webview-sethtml (params)
   "Handle webview/sethtml notification."
-  (let ((panel (gethash id cody--chat-panels)))
+  (let* ((id (plist-get params :handle))
+         (html (plist-get params :html))
+         (panel (gethash id cody--chat-panels)))
     (if panel
         (if (cody--chat-connection-ready panel)
             (ws-send (cody--chat-connection-websocket panel)
@@ -2567,7 +2569,7 @@ CONN is the connection to the agent."
     (`webview/setOptions
      (cody--log "TODO: webview/setOptions"))
     (`webview/setHtml
-     (cody--log "TODO: webview/setHtml"))
+     (cody--webview-sethtml (car params)))
     (`webview/registerWebviewViewProvider nil)
     (`progress/start
      (cody--handle-progress-start (car params)))
@@ -2716,7 +2718,7 @@ CONN is the connection to the agent."
 
 (defun cody--handle-webview-create-webview-panel (params)
   "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
-  (let ((handle (plist-get (car params) :handle)))
+  (let ((handle (plist-get params :handle)))
     (cody--create-chat-panel handle)
     (browse-url (format "%s/chat?id=%s" (cody--chat-web-server-origin) handle))))
 
