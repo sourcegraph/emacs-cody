@@ -2413,9 +2413,7 @@ to see the current completion response object in detail.
                 ((string= path "/chat")
                  (cody--handle-web-chat process (cdr (assoc "id" headers))))
                 ((string= path "/ws")
-                 (if (ws-web-socket-connect request nil)
-                     (cody--handle-websocket request)
-                   (cody--handle-default process path)))
+                 (cody--handle-websocket request))
                 ((string-match "/static/\\(.*\\)" path)
                  (cody--handle-web-subresource process (match-string 1 path)))
                 (t
