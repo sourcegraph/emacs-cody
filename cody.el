@@ -2470,7 +2470,8 @@ to see the current completion response object in detail.
   "Handle incoming WebSocket connections."
   (let ((process (ws-web-socket-connect request
                                         (lambda (ws frame)
-                                          (cody--websocket-handler-message ws frame)))))
+                                          (with-current-buffer (process-buffer ws)
+                                            (cody--websocket-handler-message ws frame))))))
     (if process
         (cody--websocket-handler-open process request))
     process))
@@ -2517,11 +2518,11 @@ to see the current completion response object in detail.
     (cond
      ((string= what "postMessageStringEncoded")
       (cody--request 'webview/receiveMessageStringEncoded
-                     (list :id id :messageStringEncoded payload)))
+                     payload))
      ((string= what "ready")
       (cody--handle-panel-ready ws payload))
      (t
-      (cody--log "Unknown message type: %s" type)))))
+      (cody--log "Unknown message type: %s" what)))))
 
 (defun cody--handle-panel-ready (ws payload)
   "Handle panel ready message."
@@ -2764,6 +2765,7 @@ CONN is the connection to the agent."
 
 (defun cody--handle-webview-post-message-string-encoded (params)
   "Handle 'webview/postMessageStringEncoded' notification with PARAMS from the server."
+  (message "postMessage %s" params)
   (let ((id (plist-get params :id))
         (encoded-message (plist-get params :stringEncodedMessage))
         (panel (gethash id cody--chat-panels)))

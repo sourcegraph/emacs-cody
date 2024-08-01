@@ -36,6 +36,7 @@ globalThis.acquireVsCodeApi = (function() {
   const id = getQueryParams()['id'];
 
   let socket = new WebSocket(`ws://${window.location.host}/ws${window.location.search}`)
+  window.socket = socket; // TODO: debugging, remove
   socket.onmessage = (event) => {
     let message = JSON.parse(event.data);
     switch (message.what) {
@@ -67,6 +68,7 @@ globalThis.acquireVsCodeApi = (function() {
     acquired = true;
     return Object.freeze({
       postMessage: function(message) {
+        console.log('postMessage', message);
         socket.send(JSON.stringify({
           what: 'postMessageStringEncoded',
           data: {
