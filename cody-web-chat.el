@@ -69,8 +69,10 @@ globalThis.acquireVsCodeApi = (function() {
       postMessage: function(message) {
         socket.send(JSON.stringify({
           what: 'postMessageStringEncoded',
-          id,
-          data: JSON.stringify(message)
+          data: {
+            id,
+            'messageStringEncoded': JSON.stringify(message)
+          }
         }));
       },
       setState: function(newState) {

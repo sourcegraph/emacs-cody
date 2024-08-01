@@ -2511,14 +2511,12 @@ to see the current completion response object in detail.
   (let* ((json-object-type 'plist)
          (data (json-read-from-string frame))
          (what (plist-get data :what))
-         ;; TODO: This ID is associated with the websocket connection so use that instead.
-         (id (plist-get data :id))
          (payload (plist-get data :data)))
     (cond
-     ((string= type "postMessageStringEncoded")
+     ((string= what "postMessageStringEncoded")
       (cody--request 'webview/receiveMessageStringEncoded
                      (list :id id :messageStringEncoded payload)))
-     ((string= type "ready")
+     ((string= what "ready")
       (cody--handle-panel-ready ws payload))
      (t
       (cody--log "Unknown message type: %s" type)))))
