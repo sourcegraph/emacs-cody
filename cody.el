@@ -422,10 +422,6 @@ Argument CC is the completion object."
   (websocket nil :type (or null ws-web-socket))
   (ready nil :type boolean))
 
-(defvar cody--chat-panels (make-hash-table :test 'equal)
-  "Hash table to store chat panel connections.
-Keys are string panel ids. Values are `cody--chat-connection' objects.")
-
 ;; It might seem odd to have a separate Node process for each workspace,
 ;; but it makes things more flexible in general; e.g. integration testing
 ;; without interfering with your normal Cody session, or hitting dev backends.
@@ -442,6 +438,10 @@ Each Cody-enabled workspace has a separate Agent instance."
   (error nil :type (or null string)) ; last error encountered
   (events-buffer nil :type (or null buffer))
   (stderr-buffer nil :type (or null buffer)))
+
+(defvar cody--chat-panels (make-hash-table :test 'equal)
+  "Hash table to store chat panel connections.
+Keys are string panel ids. Values are `cody--chat-connection' objects.")
 
 (defvar cody-workspaces (make-hash-table :test 'equal)
   "Hash table mapping workspace root uris to `cody-workspace' structs.
@@ -478,6 +478,9 @@ When testing, the calls go through to the LLM.")
 (defconst cody-log-buffer-name "*cody-log*"
   "Cody log messages.
 This log is shared across all agent connections.")
+
+(defvar cody--new-webserver-per-chat nil
+  "Developer-mode setting to kill and restart webserver on each chat.")
 
 (defvar cody-prefix-map nil "Map for bindings with Cody's prefix.")
 (define-prefix-command 'cody-prefix-map)
@@ -2397,10 +2400,10 @@ to see the current completion response object in detail.
 (defun cody--chat-new (&optional prefix)
   "Start a new Cody chat session. If PREFIX is non-nil, stop the webserver before starting it.
 With a prefix argument, stops the current webserver (for development)."
-  (interactive "P")
+  (interactive)
   (if (cody--alive-p)
       (progn
-        (when prefix
+        (when 
           (cody--webserver-stop))
         (cody--webserver-start)
         (run-with-idle-timer 0 nil (lambda ()
