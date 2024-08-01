@@ -2477,8 +2477,8 @@ With a prefix argument, stops the current webserver (for development)."
   (let ((process (ws-web-socket-connect request
                                         (lambda (ws frame)
                                           (cody--websocket-handler-message ws frame)))))
-    (if process
-        (cody--websocket-handler-open process request))
+    (when process
+      (cody--websocket-handler-open process request))
     process))
 
 (defun cody--websocket-handler-open (ws request)
@@ -2508,11 +2508,8 @@ With a prefix argument, stops the current webserver (for development)."
 (defun cody--extract-id-from-websocket-request (request)
   "Extract chat ID from WebSocket request query string."
   (let* ((headers (oref request headers))
-         (uri (or (cdr (assoc :GET headers))
-                  (cdr (assoc :URI headers))))
-         (query-string (cadr (split-string uri "?"))))
-    (when (and query-string (string-match "id=\\([^&]+\\)" query-string))
-      (match-string 1 query-string))))
+         (id (cdr (assoc "id" headers))))
+      id))
 
 (defvar cody--message-queue nil
   "Queue to store incoming websocket messages.")
@@ -2559,6 +2556,7 @@ With a prefix argument, stops the current webserver (for development)."
 (defun cody--create-chat-panel (id)
   "Create a new chat panel connection."
   (let ((panel (make-cody--chat-connection :id id)))
+    (cody--log "cody--create-chat-panel: %s" id)
     (puthash id panel cody--chat-panels)
     panel))
 
