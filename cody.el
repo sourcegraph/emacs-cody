@@ -2411,18 +2411,17 @@ to see the current completion response object in detail.
           (ws-start
            (lambda (request)
              (with-slots (process headers) request
-               (let ((path (cdr (assoc :GET headers))))
-                 (cond
-                  ((string= path "/chat")
-                   (cody--handle-web-chat process (cdr (assoc "id" headers))))
-                  ((string= path "/ws")
-                   (message "calling cody--handle-websocket")
-                   (cody--handle-websocket request)
-                   (prog1 :keep-alive (setf my-connection 'blah)))
-                  ((string-match "/static/\\(.*\\)" path)
-                   (cody--handle-web-subresource process (match-string 1 path)))
-                  (t
-                   (cody--handle-default process path))))))
+               ;; If a web-socket request, then connect and keep open
+               (if (cody--handle-websocket request)
+                   :keep-alive
+                 (let ((path (cdr (assoc :GET headers))))
+                   (cond
+                    ((string= path "/chat")
+                     (cody--handle-web-chat process (cdr (assoc "id" headers))))
+                    ((string-match "/static/\\(.*\\)" path)
+                     (cody--handle-web-subresource process (match-string 1 path)))
+                    (t
+                     (cody--handle-default process path)))))))
            cody--chat-web-server-port
            nil  ;; No log-buffer
            :socket-options (list (cons 'reuse-address t))))  ;; Keyword argument for network options
@@ -2470,13 +2469,10 @@ to see the current completion response object in detail.
 (defun cody--handle-websocket (request)
   "Handle incoming WebSocket connections."
   (ws-web-socket-connect request
-                         (lambda (ws)
-                           (cody--websocket-handler-open ws request))
                          (lambda (ws frame)
-                           (cody--websocket-handler-message ws frame))
-                         (lambda (ws)
-                           (cody--websocket-handler-close ws))))
+                           (cody--websocket-handler-message ws frame))))
 
+;; TODO: there's no web socket "open"
 (defun cody--websocket-handler-open (ws request)
   "Handle WebSocket connection opening."
   (cody--log "WebSocket connection opened")
@@ -2494,6 +2490,7 @@ to see the current completion response object in detail.
   (cody--log "Received WebSocket message: %s" frame)
   (cody--handle-websocket-message ws frame))
 
+;; TODO: there's no web socket "close"
 (defun cody--websocket-handler-close (ws)
   "Handle WebSocket connection closure."
   (cody--log "WebSocket connection closed")
@@ -2510,6 +2507,7 @@ to see the current completion response object in detail.
 
 (defun cody--handle-websocket-message (ws frame)
   "Handle incoming WebSocket message."
+  (message "websocket: %s" frame)
   (let* ((json-object-type 'plist)
          (data (json-read-from-string frame))
          (what (plist-get data :what))
