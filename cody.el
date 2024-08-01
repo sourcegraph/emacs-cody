@@ -2394,11 +2394,14 @@ to see the current completion response object in detail.
 
 ;; Chat
 
-(defun cody--chat-new ()
-  "Start a new Cody chat session."
-  (interactive)
+(defun cody--chat-new (&optional prefix)
+  "Start a new Cody chat session. If PREFIX is non-nil, stop the webserver before starting it.
+With a prefix argument, stops the current webserver (for development)."
+  (interactive "P")
   (if (cody--alive-p)
       (progn
+        (when prefix
+          (cody--webserver-stop))
         (cody--webserver-start)
         (run-with-idle-timer 0 nil (lambda ()
                                      (cody--request 'chat/web/new nil))))
@@ -2470,8 +2473,7 @@ to see the current completion response object in detail.
   "Handle incoming WebSocket connections."
   (let ((process (ws-web-socket-connect request
                                         (lambda (ws frame)
-                                          (with-current-buffer (process-buffer ws)
-                                            (cody--websocket-handler-message ws frame))))))
+                                          (cody--websocket-handler-message ws frame)))))
     (if process
         (cody--websocket-handler-open process request))
     process))
@@ -2482,7 +2484,7 @@ to see the current completion response object in detail.
          (panel (gethash id cody--chat-panels)))
     (if (and panel (null (cody--chat-connection-ready panel)))
         (progn
-            (cody--log "WebSocket connection opened %s" id)
+          (cody--log "WebSocket connection opened %s" id)
           (setf (cody--chat-connection-websocket panel) ws)
           (setf (cody--chat-connection-ready panel) t)
           (cody--send-buffered-data panel))
@@ -2508,21 +2510,48 @@ to see the current completion response object in detail.
     (when (and query-string (string-match "id=\\([^&]+\\)" query-string))
       (match-string 1 query-string))))
 
+(defvar cody--message-queue nil
+  "Queue to store incoming websocket messages.")
+
+(defvar cody--processing-message nil
+  "Flag to indicate if a message is currently being processed.")
+
 (defun cody--handle-websocket-message (ws frame)
-  "Handle incoming WebSocket message."
-  (message "websocket: %s" frame)
+  "Handle incoming WebSocket message by queuing it."
+  (message "Queueing message: %s %s" ws frame)
+  (push (cons ws frame) cody--message-queue)
+  (cody--process-message-queue))
+
+(defun cody--process-message-queue ()
+  "Process the next message in the websocket message queue."
+  (when (and cody--message-queue (not cody--processing-message))
+    (setq cody--processing-message t)
+    (let* ((message (pop cody--message-queue))
+           (ws (car message))
+           (frame (cdr message)))
+      (unwind-protect
+          (condition-case err
+              (cody--process-single-message ws frame)
+            (error (cody--log "Error processing websocket message: %s" err)))
+        (setq cody--processing-message nil)
+        (when cody--message-queue
+          (cody--process-message-queue))))))
+
+(defun cody--process-single-message (ws frame)
+  "Process a single websocket message."
+  (message "Processing message: %s %s" ws frame)
   (let* ((json-object-type 'plist)
          (data (json-read-from-string frame))
          (what (plist-get data :what))
          (payload (plist-get data :data)))
     (cond
      ((string= what "postMessageStringEncoded")
-      (cody--request 'webview/receiveMessageStringEncoded
-                     payload))
+      (cody--request 'webview/receiveMessageStringEncoded payload))
      ((string= what "ready")
       (cody--handle-panel-ready ws payload))
      (t
-      (cody--log "Unknown message type: %s" what)))))
+      (cody--log "Unknown message type: %s" what))))
+  (message "Finished processing message: %s" frame))
 
 (defun cody--handle-panel-ready (ws payload)
   "Handle panel ready message."
@@ -2775,8 +2804,8 @@ CONN is the connection to the agent."
                                  ;; See cody--web-rewrite-root-html
                                  (ws-web-socket-frame (json-encode `((what . "postMessageStringEncoded")
                                                                      (data . ,encoded-message)))))
-          (cody--log "Error: No chat connection ready for id %s, the producer should wait for the webview to be ready" id)
-      (cody--log "Error: No chat panel found for id %s" id)))))
+          (cody--log "Error: No chat connection ready for id %s, the producer should wait for the webview to be ready" id))
+      (cody--log "Error: No chat panel found for id %s" id))))
 
 (defun cody--handle-webview-create-webview-panel (params)
   "Handle 'webview/createWebviewPanel' notification with PARAMS from the server."
