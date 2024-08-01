@@ -89,8 +89,7 @@ delete window.top;
 delete window.frameElement;
 </script>
 "))
-    (cody--web-chat-fix-csp
-     (replace-regexp-in-string "<head>" api html t t))))
+    (replace-regexp-in-string "<head>" api html t t)))
 
 (defun cody--web-chat-fix-csp (html)
   "Update the Content Security Policy to allow websocket connections."
