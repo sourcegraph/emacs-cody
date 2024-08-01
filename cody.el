@@ -2483,6 +2483,7 @@ With a prefix argument, stops the current webserver (for development)."
 
 (defun cody--websocket-handler-open (ws request)
   "Handle WebSocket connection opening."
+  (message "Got `cody--websocket-handler-open'")
   (let* ((id (cody--extract-id-from-websocket-request request))
          (panel (gethash id cody--chat-panels)))
     (if (and panel (null (cody--chat-connection-ready panel)))
@@ -2491,7 +2492,7 @@ With a prefix argument, stops the current webserver (for development)."
           (setf (cody--chat-connection-websocket panel) ws)
           (setf (cody--chat-connection-ready panel) t)
           (cody--send-buffered-data panel))
-      )))
+      (cody--log "Warning: No ready panel avaialble with open."))))
 
 (defun cody--websocket-handler-message (ws frame)
   "Handle incoming WebSocket messages."
@@ -2798,9 +2799,9 @@ CONN is the connection to the agent."
 (defun cody--handle-webview-post-message-string-encoded (params)
   "Handle 'webview/postMessageStringEncoded' notification with PARAMS from the server."
   (message "postMessage %s" params)
-  (let ((id (plist-get params :id))
-        (encoded-message (plist-get params :stringEncodedMessage))
-        (panel (gethash id cody--chat-panels)))
+  (let* ((id (plist-get params :id))
+         (encoded-message (plist-get params :stringEncodedMessage))
+         (panel (gethash id cody--chat-panels)))
     (if panel
         (if (cody--chat-connection-ready panel)
             (process-send-string (cody--chat-connection-websocket panel)
