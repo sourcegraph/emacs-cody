@@ -36,7 +36,7 @@ globalThis.acquireVsCodeApi = (function() {
   const id = getQueryParams()['id'];
 
   let socket = new WebSocket(`ws://${window.location.host}/ws${window.location.search}`)
-  window.socket = socket; // TODO: debugging, remove
+  window.goodies = { socket, id }; // TODO: debugging, remove
   socket.onmessage = (event) => {
     let message = JSON.parse(event.data);
     switch (message.what) {
@@ -45,14 +45,19 @@ globalThis.acquireVsCodeApi = (function() {
       synthEvent.data = JSON.parse(message.data);
       window.dispatchEvent(synthEvent);
       break;
+    case 'ok':
+      if (messages.length) {
+        socket.send(messages.shift());
+      } else {
+        blocking = false;
+      }
     default:
       console.warn('do not know how to handle ws message', message);
       break;
     }
   };
   socket.onopen = (event) => {
-    // TODO: This event is not necessary, we could use WebSocket connection as a ready signal.
-    socket.send(JSON.stringify({what: 'ready', data: { id: id }}));
+    console.log('onopen');
   };
   socket.onclose = (event) => {
     console.warn('socket closed, NYI reconnection', event);
@@ -61,6 +66,9 @@ globalThis.acquireVsCodeApi = (function() {
     console.warn('socked error, NYI reconnection', event);
   };
 
+  const messages = [];
+  let blocking = false;
+
   return () => {
     if (acquired) {
       throw new Error('VsCodeApi already acquired');
@@ -68,14 +76,20 @@ globalThis.acquireVsCodeApi = (function() {
     acquired = true;
     return Object.freeze({
       postMessage: function(message) {
-        console.log('postMessage', message);
-        socket.send(JSON.stringify({
+        console.log('postMessage', message, 'blocking', blocking, 'queued', messages.length);
+        const msg = JSON.stringify({
           what: 'postMessageStringEncoded',
           data: {
             id,
             'messageStringEncoded': JSON.stringify(message)
           }
-        }));
+        });
+        if (blocking) {
+          messages.push(msg);
+        } else {
+          blocking = true;
+          socket.send(msg);
+        }
       },
       setState: function(newState) {
         console.log('not yet implemented: setState', newState);

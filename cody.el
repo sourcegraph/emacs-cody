@@ -2537,6 +2537,7 @@ With a prefix argument, stops the current webserver (for development)."
           (condition-case err
               (cody--process-single-message ws frame)
             (error (cody--log "Error processing websocket message: %s" err)))
+        (process-send-string ws (ws-web-socket-frame "{\"what\":\"ok\"}"))
         (setq cody--processing-message nil)
         (when cody--message-queue
           (cody--process-message-queue))))))
@@ -2551,18 +2552,9 @@ With a prefix argument, stops the current webserver (for development)."
     (cond
      ((string= what "postMessageStringEncoded")
       (cody--request 'webview/receiveMessageStringEncoded payload))
-     ((string= what "ready")
-      (cody--handle-panel-ready ws payload))
      (t
       (cody--log "Unknown message type: %s" what))))
   (message "Finished processing message: %s" frame))
-
-(defun cody--handle-panel-ready (ws payload)
-  "Handle panel ready message."
-  (let ((id (plist-get payload :id)))
-    (when-let ((panel (gethash id cody--chat-panels)))
-      (setf (cody--chat-connection-ready panel) t)
-      (cody--send-buffered-data panel))))
 
 (defun cody--create-chat-panel (id)
   "Create a new chat panel connection."
