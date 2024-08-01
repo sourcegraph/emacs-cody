@@ -2468,22 +2468,24 @@ to see the current completion response object in detail.
 
 (defun cody--handle-websocket (request)
   "Handle incoming WebSocket connections."
-  (ws-web-socket-connect request
-                         (lambda (ws frame)
-                           (cody--websocket-handler-message ws frame))))
+  (let ((process (ws-web-socket-connect request
+                                        (lambda (ws frame)
+                                          (cody--websocket-handler-message ws frame)))))
+    (if process
+        (cody--websocket-handler-open process request))
+    process))
 
-;; TODO: there's no web socket "open"
 (defun cody--websocket-handler-open (ws request)
   "Handle WebSocket connection opening."
-  (cody--log "WebSocket connection opened")
   (let* ((id (cody--extract-id-from-websocket-request request))
          (panel (gethash id cody--chat-panels)))
-    (if panel
+    (if (and panel (null (cody--chat-connection-ready panel)))
         (progn
+            (cody--log "WebSocket connection opened %s" id)
           (setf (cody--chat-connection-websocket panel) ws)
           (setf (cody--chat-connection-ready panel) t)
           (cody--send-buffered-data panel))
-      (cody--log "Error: No chat panel found for id %s" id))))
+      )))
 
 (defun cody--websocket-handler-message (ws frame)
   "Handle incoming WebSocket messages."
@@ -2546,12 +2548,18 @@ to see the current completion response object in detail.
   (when (cody--chat-connection-ready panel)
     (let ((ws (cody--chat-connection-websocket panel)))
       (when (cody--chat-connection-buffered-options panel)
-        (ws-send ws (json-encode `((type . "setOptions")
-                                   (payload . ,(cody--chat-connection-buffered-options panel)))))
+        (process-send-string
+         ws
+         (ws-web-socket-frame
+          (json-encode `((type . "setOptions")
+                         (payload . ,(cody--chat-connection-buffered-options panel))))))
         (setf (cody--chat-connection-buffered-options panel) nil))
       (when (cody--chat-connection-buffered-html panel)
-        (ws-send ws (json-encode `((type . "setHtml")
-                                   (payload . ,(cody--chat-connection-buffered-html panel)))))
+        (process-send-string
+         ws
+         (ws-web-socket-frame
+          (json-encode `((type . "setHtml")
+                         (payload . ,(cody--chat-connection-buffered-html panel))))))
         (setf (cody--chat-connection-buffered-html panel) nil)))))
 
 (defun cody--webview-setoptions (id options)
@@ -2559,9 +2567,10 @@ to see the current completion response object in detail.
   (let ((panel (gethash id cody--chat-panels)))
     (if panel
         (if (cody--chat-connection-ready panel)
-            (ws-send (cody--chat-connection-websocket panel)
-                     (json-encode `((type . "setOptions")
-                                    (payload . ,options))))
+            (process-send-string
+             (cody--chat-connection-websocket panel)
+             (ws-web-socket-frame (json-encode `((type . "setOptions")
+                                                 (payload . ,options)))))
           (setf (cody--chat-connection-buffered-options panel) options))
       (cody--log "Error: No chat panel found for id %s" id))))
 
@@ -2572,9 +2581,10 @@ to see the current completion response object in detail.
          (panel (gethash id cody--chat-panels)))
     (if panel
         (if (cody--chat-connection-ready panel)
-            (ws-send (cody--chat-connection-websocket panel)
-                     (json-encode `((type . "setHtml")
-                                    (payload . ,html))))
+            (process-send-string
+             (cody--chat-connection-websocket panel)
+             (ws-web-socket-frame (json-encode `((type . "setHtml")
+                                                 (payload . ,html)))))
           (setf (cody--chat-connection-buffered-html panel) html))
       (cody--log "Error: No chat panel found for id %s" id))))
 
@@ -2759,10 +2769,10 @@ CONN is the connection to the agent."
         (panel (gethash id cody--chat-panels)))
     (if panel
         (if (cody--chat-connection-ready panel)
-            (ws-send (cody--chat-connection-websocket panel)
-                     ; See cody--web-rewrite-root-html
-                     (json-encode `((what . "postMessageStringEncoded")
-                                    (data . ,encoded-message))))
+            (process-send-string (cody--chat-connection-websocket panel)
+                                 ;; See cody--web-rewrite-root-html
+                                 (ws-web-socket-frame (json-encode `((what . "postMessageStringEncoded")
+                                                                     (data . ,encoded-message)))))
           (cody--log "Error: No chat connection ready for id %s, the producer should wait for the webview to be ready" id)
       (cody--log "Error: No chat panel found for id %s" id)))))
 
