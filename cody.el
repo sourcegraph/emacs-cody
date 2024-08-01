@@ -2403,8 +2403,8 @@ With a prefix argument, stops the current webserver (for development)."
   (interactive)
   (if (cody--alive-p)
       (progn
-        (when 
-          (cody--webserver-stop))
+        (when
+            (cody--webserver-stop))
         (cody--webserver-start)
         (run-with-idle-timer 0 nil (lambda ()
                                      (cody--request 'chat/web/new nil))))
